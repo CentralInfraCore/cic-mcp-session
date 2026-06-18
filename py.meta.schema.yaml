@@ -1,0 +1,161 @@
+---
+type: object
+required:
+  - module
+  - description
+  - tags
+  - category
+  - used_in
+  - entrypoint
+  - related_nodes
+  - objects
+properties:
+  module:
+    type: string
+    description: Python module name, derived from the file path (e.g. "tools.releaselib.git_service").
+
+  description:
+    type: string
+    description: Human-readable summary of the file's purpose (Hungarian or English). Extracted from the module docstring.
+
+  tags:
+    type: array
+    description: "Thematic tags for AI context integration. Same vocabulary as go.meta.schema.yaml — allows cross-language graph queries by tag. Allowed values:"
+    items:
+      type: string
+      enum:
+        - relay             # Related to AI relay modules
+        - compliance        # Compliance or validation logic
+        - workflow          # Process or pipeline logic
+        - cictor            # Part of the CICTOR decision system
+        - schema            # Schema processing
+        - parser            # Input parsing
+        - guard             # Access or protection logic
+        - core              # Core system logic
+        - doc               # Documentation or explanatory content
+        - interface         # Interface logic with external systems
+        - gateway           # Entry or gateway-related logic
+        - builder           # Build or generation tasks
+        - test              # Validation, testing or debugging logic
+        - meta              # Meta-structures or internal definitions
+        - orchestrator      # Coordinates control or decision chains
+        - decision          # Decision logic
+        - reflector         # Feedback or reflection module
+        - context           # Contextual management
+        - validator         # Data or schema validation
+        - executor          # Direct logic execution
+        - hook              # Event-triggered callable logic
+        - template          # Template component
+        - fallback          # Fallback or alternative behavior
+        - session           # Session or state-handling
+        - metrics           # Metric collection or monitoring
+        - storage           # Storage or persistence
+        - loader            # Config or module loading
+        - renderer          # Output generation
+        - platform-engineering
+        - ci-cd
+        - ecosystem
+
+  category:
+    type: array
+    description: "Functional role(s) of the file. Allowed values:"
+    items:
+      type: string
+      enum:
+        - modul             # General module
+        - decision          # Decision logic
+        - morális           # Moral or rule-based logic
+        - belépési          # Entry point (user or system)
+        - meta              # Internal meta structures
+        - elemző            # Evaluation or analysis logic
+        - concept           # High-level concept
+        - architecture      # Architectural blueprint
+        - ci-cd             # CI/CD related
+
+  used_in:
+    type: array
+    description: "Workflows or processes where this file is used. Allowed values:"
+    items:
+      type: string
+      enum:
+        - decision_flow         # Decision logic execution
+        - validation            # Validation process
+        - generation            # Build or generation pipeline
+        - onboarding            # System initialization
+        - fallback_process      # Fallback handling
+        - distribution          # Software distribution
+        - publishing            # Release publishing
+        - development-process   # Core development process
+        - architecture-review   # Architecture review
+
+  entrypoint:
+    type: boolean
+    description: Whether this file is a system or workflow entry point (e.g. `if __name__ == "__main__":`, a CLI tool, or an MCP server boot file).
+
+  related_nodes:
+    type: array
+    items:
+      type: string
+    description: >
+      References to related concepts, modules, or other Python files.
+      Use relative paths (e.g. 'tools/releaselib/git_service') or concept names.
+
+  objects:
+    type: array
+    description: All top-level objects defined in this Python file (module-level classes, functions, and constants; methods are nested under their class).
+    items:
+      type: object
+      required:
+        - name
+        - kind
+        - description
+      properties:
+        name:
+          type: string
+          description: Identifier name as declared in the Python source.
+
+        kind:
+          type: string
+          description: Kind of the Python declaration.
+          enum:
+            - class         # class Name: ...
+            - function      # module-level def name(...): ...
+            - method        # def name(self, ...): ... inside a class
+            - const         # module-level NAME = ... assignment
+
+        receiver:
+          type: string
+          description: >
+            Owning class name for methods (kind: method).
+            Example: "VaultService" for def sign(self, ...) inside class VaultService.
+
+        decorators:
+          type: array
+          items:
+            type: string
+          description: >
+            Decorator names applied to this object, in source order.
+            Example: ["mcp.tool"] for @mcp.tool(), ["staticmethod"] for @staticmethod.
+            Auto-generated by py.meta.gen.py.
+
+        description:
+          type: string
+          description: Human-readable summary of what this object does. Extracted from its docstring.
+
+        implements:
+          type: array
+          items:
+            type: string
+          description: >
+            Base class(es) or ABC(s) this class derives from. Use "module.Base" for
+            external bases, plain "Base" for local ones. Only relevant for kind: class.
+
+        references:
+          type: array
+          items:
+            type: string
+          description: >
+            Non-stdlib names/objects referenced by this declaration's body.
+            Includes both third-party (e.g. "yaml.safe_load") and same-module
+            cross-file references. Format: "module.Name". Auto-generated by
+            py.meta.gen.py — review and trim as needed.

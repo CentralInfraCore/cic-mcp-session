@@ -1,0 +1,149 @@
+---
+module: make_source
+description: ''
+tags:
+- builder
+- core
+- loader
+- storage
+category: []
+used_in: []
+entrypoint: true
+related_nodes: []
+objects:
+- name: EMBEDDING_MODEL
+  kind: const
+  description: ''
+  references: []
+- name: tokenize
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: detect_language
+  kind: function
+  decorators: []
+  description: ''
+  references:
+  - langdetect.LangDetectException
+  - langdetect.detect
+- name: load_companion_yaml
+  kind: function
+  decorators: []
+  description: Load a companion .yaml file for an .md file if it exists.
+  references:
+  - yaml.YAMLError
+  - yaml.safe_load
+- name: _normalize_list
+  kind: function
+  decorators: []
+  description: Normalize a YAML value to a list of strings.
+  references: []
+- name: process_md_file
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: process_go_yaml
+  kind: function
+  decorators: []
+  description: Process a .go.yaml companion file as structured knowledge chunks. The
+    .go source file is not indexed (code excluded by design); this YAML is the sole
+    knowledge source for Go files in the KB. Produces one chunk per object defined
+    in the file. File-level metadata (tags, category, used_in) is applied to all chunks.
+  references:
+  - yaml.YAMLError
+  - yaml.safe_load
+- name: process_yaml_file
+  kind: function
+  decorators: []
+  description: Processes a YAML file as a single, large chunk to preserve context.
+  references:
+  - yaml.YAMLError
+  - yaml.dump
+  - yaml.safe_load
+- name: create_embeddings
+  kind: function
+  decorators: []
+  description: Encode texts using a multilingual sentence transformer model.
+  references:
+  - numpy.array
+  - sentence_transformers.SentenceTransformer
+- name: build_faiss_index
+  kind: function
+  decorators: []
+  description: Build FAISS inner-product index (cosine sim with normalized vectors).
+  references:
+  - faiss.IndexFlatIP
+- name: build_bm25_index
+  kind: function
+  decorators: []
+  description: Build BM25 index for lexical search.
+  references:
+  - rank_bm25.BM25Okapi
+- name: create_bm25_inverted_index
+  kind: function
+  decorators: []
+  description: Lightweight inverted index from BM25 scores (for SQLite compat).
+  references: []
+- name: build_metadata_index
+  kind: function
+  decorators: []
+  description: Build O(1) lookup indexes for tags, category, used_in, entrypoints.
+  references: []
+- name: _resolve_related_node
+  kind: function
+  decorators: []
+  description: Resolve a relative related_node path to chunk_ids.
+  references: []
+- name: create_knowledge_graph_with_content
+  kind: function
+  decorators: []
+  description: Build knowledge graph using embedding cosine similarity + YAML related_nodes.
+  references: []
+- name: _content_hash
+  kind: function
+  decorators: []
+  description: Return SHA256 hex digest of normalized text content.
+  references: []
+- name: _dedup_chunks
+  kind: function
+  decorators: []
+  description: 'Deduplicate chunks with identical content. Chunks with the same text
+    are merged into a single chunk: - file_path  : canonical (first seen) path — kept
+    for backward compat - file_paths : list of ALL paths where this content appears
+    - tags / category / used_in / related_nodes : union of all occurrences'
+  references: []
+- name: _is_go_meta_yaml
+  kind: function
+  decorators: []
+  description: Return True if the YAML file is a Go meta companion (has 'package'
+    + 'objects'). Used when the sibling .go file is absent (e.g. in docs-only submodules).
+  references:
+  - yaml.safe_load
+- name: process_directory
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: build_knowledge_base
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: save_knowledge_base_legacy
+  kind: function
+  decorators: []
+  description: ''
+  references:
+  - faiss.write_index
+- name: save_kb_to_sqlite
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: generate_edge_types_doc
+  kind: function
+  decorators: []
+  description: Generates a markdown file documenting all unique edge types.
+  references: []

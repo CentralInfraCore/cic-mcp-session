@@ -1,0 +1,417 @@
+---
+module: server
+description: 'Graph MCP server for CIC knowledge base stored in PKL files (legacy
+  format supported). Read-only MCP server that exposes: - token search via inverted_index.pkl
+  - chunk/node lookup - graph traversal (neighbors) - simple filtering (by tag/category/used_in)
+  if metadata exists in node/chunk payloads - focus_pack: context gathering with rule
+  prioritization - explain_node: deep dive into specific nodes - search_nodes: lookup
+  nodes by name/label/tags - kb_status: check KB file status - reload_kb: force-reload
+  the knowledge base Works with stdio (default) and SSE (HTTP) if you wrap it similarly
+  to your docs_mcp.py.'
+tags:
+- core
+- gateway
+- interface
+- loader
+category: []
+used_in: []
+entrypoint: true
+related_nodes: []
+objects:
+- name: mcp
+  kind: const
+  description: ''
+  references: []
+- name: BASE_DIR
+  kind: const
+  description: ''
+  references: []
+- name: DATA_DIR
+  kind: const
+  description: ''
+  references: []
+- name: CHUNKS_PKL
+  kind: const
+  description: ''
+  references: []
+- name: NODES_PKL
+  kind: const
+  description: ''
+  references: []
+- name: EDGES_PKL
+  kind: const
+  description: ''
+  references: []
+- name: INVERTED_PKL
+  kind: const
+  description: ''
+  references: []
+- name: FAISS_INDEX
+  kind: const
+  description: ''
+  references: []
+- name: BM25_PKL
+  kind: const
+  description: ''
+  references: []
+- name: CHUNK_IDS_PKL
+  kind: const
+  description: ''
+  references: []
+- name: MODEL_NAME_PKL
+  kind: const
+  description: ''
+  references: []
+- name: METADATA_INDEX_PKL
+  kind: const
+  description: ''
+  references: []
+- name: DEFAULT_TOPK
+  kind: const
+  description: ''
+  references: []
+- name: MAX_TOPK
+  kind: const
+  description: ''
+  references: []
+- name: MAX_NEIGHBORS
+  kind: const
+  description: ''
+  references: []
+- name: MAX_RESOLVE_MATCHES
+  kind: const
+  description: ''
+  references: []
+- name: MAX_SEARCH_CODE_HITS
+  kind: const
+  description: ''
+  references: []
+- name: ENABLE_SEARCH_CODE
+  kind: const
+  description: ''
+  references: []
+- name: RULE_HINTS
+  kind: const
+  description: ''
+  references: []
+- name: RULE_FILE_HINTS
+  kind: const
+  description: ''
+  references: []
+- name: _clamp_topk
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: _normalize_line_range
+  kind: function
+  decorators: []
+  description: Normalize line range to [start, end] list of ints or None.
+  references: []
+- name: load_kb
+  kind: function
+  decorators:
+  - lru_cache
+  description: Load all PKL artifacts into memory once.
+  references:
+  - sentence_transformers.SentenceTransformer
+  - faiss.read_index
+- name: _tokenize
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: _extract_chunk_text
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: _extract_chunk_file_paths
+  kind: function
+  decorators: []
+  description: 'Return all file paths for a chunk (dedup-aware: file_paths list).'
+  references: []
+- name: _extract_chunk_file_path
+  kind: function
+  decorators: []
+  description: Return the canonical (primary) file path for a chunk.
+  references: []
+- name: _extract_chunk_section
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: _rule_bonus_for_chunk
+  kind: function
+  decorators: []
+  description: Give a deterministic bonus to rule-like chunks/files.
+  references: []
+- name: _kb_mtimes
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: kb_status
+  kind: function
+  decorators:
+  - mcp.tool
+  description: Return detailed status about loaded KB artifacts.
+  references: []
+- name: reload_kb
+  kind: function
+  decorators:
+  - mcp.tool
+  description: Force reload of KB artifacts from disk. Useful after regenerating PKL
+    files.
+  references: []
+- name: list_edge_types
+  kind: function
+  decorators:
+  - mcp.tool
+  description: List all unique edge types found in the graph.
+  references: []
+- name: list_node_types
+  kind: function
+  decorators:
+  - mcp.tool
+  description: List all unique node types (categories) found in the graph.
+  references: []
+- name: search_token
+  kind: function
+  decorators:
+  - mcp.tool
+  description: Lexical single-token search using BM25. Returns a list of {chunk_id,
+    score}.
+  references: []
+- name: search_query
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Semantic search using FAISS + multilingual embeddings. Returns ranked
+    chunks: {chunk_id, score, file_path, line_range}. Falls back to BM25 inverted
+    index if FAISS is not available.'
+  references: []
+- name: search_code
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Substring search in chunk content (slow, linear scan). Useful for
+    finding exact code snippets or literal strings that token search misses. Returns:
+    {chunk_id, content_preview, file_path, line_range}'
+  references: []
+- name: search_nodes
+  kind: function
+  decorators:
+  - mcp.tool
+  description: Search for nodes by name, label, type, tags, or category. Uses the
+    metadata index for O(1) tag/category lookup, then augments with linear label/type
+    scan for full coverage.
+  references: []
+- name: resolve_path
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Find chunks belonging to a specific file path. Args: file_path: The
+    path string to search for. mode: Matching mode. - "prefix": Matches if chunk path
+    starts with file_path (default). - "contains": Matches if file_path is a substring
+    of chunk path. - "exact": Matches if chunk path equals file_path. limit: Max number
+    of chunks to return (default 200). Returns: list of {chunk_id, line_range, file_path}'
+  references: []
+- name: get_chunk
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Return a chunk by id. Args: chunk_id: The ID of the chunk. max_chars:
+    Maximum characters of content to return (default 8000).'
+  references: []
+- name: get_node
+  kind: function
+  decorators:
+  - mcp.tool
+  description: Return a node by id.
+  references: []
+- name: neighbors
+  kind: function
+  decorators:
+  - mcp.tool
+  description: Return outgoing edges from a node. Optionally filter by edge_type.
+  references: []
+- name: focus_pack
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Build an enriched task context bundle. Compared to standard search:
+    - prioritizes rule-like chunks/files (CONTRACT, DoD, LIMITS) - returns ''key_rules''
+    - returns ''recommended_reading_order'''
+  references: []
+- name: explain_node
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Deep dive into a specific node: returns definition, neighbors, associated
+    chunk content, and related files.'
+  references: []
+- name: find_nodes
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Filter nodes by metadata using the prebuilt metadata index (O(1) lookup).
+    Args: category: Filter by category (exact match). tag:      Filter by tag (exact
+    match). used_in:  Filter by used_in context (exact match). top_k:    Max results.'
+  references: []
+- name: impact_analysis
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Analyse the downstream impact of a node: what depends on it, critical
+    paths, used_in coverage. Performs BFS from node_id through the adjacency graph,
+    collects all reachable downstream nodes, aggregates used_in fields, and identifies
+    critical path nodes (highest fan-out). Args: node_id: The node to start from.
+    max_depth: BFS depth limit (default 3, max 5).'
+  references: []
+- name: guided_path
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Build an ordered learning path for a topic through the knowledge graph.
+    Selects entrypoint nodes matching the topic, then traverses the graph in category
+    priority order (concept → architecture → flow → implementation) to return a structured
+    reading sequence. Args: topic: The topic or concept to learn about. max_steps:
+    Maximum nodes in the path (default 10, max 20).'
+  references: []
+- name: SOURCE_DIR
+  kind: const
+  description: ''
+  references: []
+- name: missing_companions
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'List Go source files that lack a companion YAML or have empty semantic
+    fields. Scans the source directory for .go files and reports: - ''missing'': .go
+    files with no companion .yaml at all - ''incomplete'': companion YAMLs exist but
+    category/used_in/related_nodes are all empty Results are sorted by file size descending
+    (larger = higher priority). Args: source_dir: Override the scan root (default:
+    SOURCE_DIR env or source/). include_empty_semantic: Also report companions with
+    no semantic fields filled. limit: Max entries per category (default 50).'
+  references: []
+- name: _PROMPTMAP_PATHS_ENV
+  kind: const
+  description: ''
+  references: []
+- name: _find_promptmaps
+  kind: function
+  decorators: []
+  description: Return all known PROMPTMAP.yaml paths (env override or source dir scan).
+  references: []
+- name: _load_promptmap
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: _save_promptmap
+  kind: function
+  decorators: []
+  description: ''
+  references: []
+- name: _promptmap_repo_name
+  kind: function
+  decorators: []
+  description: Derive a short repo name from PROMPTMAP path (parent directory names).
+  references: []
+- name: _iter_tasks
+  kind: function
+  decorators: []
+  description: Yield (sprint_num, task_dict) pairs from a PROMPTMAP data structure.
+  references: []
+- name: list_tasks
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'List tasks from PROMPTMAP.yaml files. Args: repo: Filter by repo name
+    substring (e.g. ''CIC-Relay''). Empty = all repos. sprint: Filter by sprint number.
+    None = all sprints. status: Filter by status (''todo'', ''done'', ''in_progress'',
+    ''failed''). None = all. Returns list of dicts with keys: repo, sprint, task,
+    status, priority, prompt (truncated).'
+  references: []
+- name: get_next_task
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Return the highest-priority todo task from PROMPTMAP files. Args:
+    repo: Filter by repo name substring. sprint: Filter by sprint number. None = any
+    sprint. Returns the full task dict (with prompt, tests, accept) or None if no
+    todo tasks found.'
+  references: []
+- name: _update_task_status
+  kind: function
+  decorators: []
+  description: Mutate a task's status in a PROMPTMAP file. Returns True if found and
+    saved.
+  references: []
+- name: claim_task
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Mark a task as in_progress in the PROMPTMAP. Args: task_id: The task
+    identifier string (e.g. ''upstream-source-http''). repo: Repo name substring to
+    narrow the search (optional). Returns: {success, repo, task_id, message}'
+  references: []
+- name: complete_task
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Mark a task as done in the PROMPTMAP. Args: task_id: The task identifier
+    string. repo: Repo name substring to narrow the search (optional). result_note:
+    Short summary of what was done (stored as ''result'' field). Returns: {success,
+    repo, task_id, message}'
+  references: []
+- name: fail_task
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Mark a task as failed in the PROMPTMAP with a reason. Args: task_id:
+    The task identifier string. reason: Why it failed (stored as ''failure_reason''
+    field). repo: Repo name substring to narrow the search (optional). Returns: {success,
+    repo, task_id, message}'
+  references: []
+- name: update_companion
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Update semantic fields in a companion YAML file (Go meta companion).
+    Only updates fields that are explicitly provided (non-empty/non-None). Auto-generated
+    fields (package, objects, references) are never touched. After updating, the file
+    must be committed (Vault Transit hook signs it automatically). Args: file_path:
+    Absolute path or path relative to SOURCE_DIR to the companion .yaml. description:
+    Package-level description (replaces empty description only if provided). category:
+    List of category tags (replaces existing list if provided). used_in: List of usage
+    contexts (replaces existing list if provided). related_nodes: List of related
+    node IDs (replaces existing list if provided). tags: List of keyword tags (replaces
+    existing list if provided). Returns: {success, path, updated_fields, message}'
+  references: []
+- name: record_decision
+  kind: function
+  decorators:
+  - mcp.tool
+  description: 'Record an agent decision as a note in a companion YAML or standalone
+    decision file. Appends a decision entry to the companion YAML''s ''agent_decisions''
+    list. If no companion_path given, tries to find the companion by node_id lookup.
+    Args: node_id: KB node ID this decision relates to. decision: Short statement
+    of the decision made. rationale: Why this decision was made (optional). companion_path:
+    Explicit path to companion YAML. If empty, resolved from node_id. Returns: {success,
+    path, message}'
+  references: []
+- name: DEFAULT_HOST
+  kind: const
+  description: ''
+  references: []
+- name: DEFAULT_PORT
+  kind: const
+  description: ''
+  references: []
+- name: main
+  kind: function
+  decorators: []
+  description: ''
+  references: []

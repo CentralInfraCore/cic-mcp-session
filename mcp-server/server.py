@@ -1167,22 +1167,30 @@ def guided_path(topic: str, max_steps: int = 10) -> dict:
 SOURCE_DIR = Path(os.environ.get("SOURCE_DIR", str(BASE_DIR / "source")))
 
 
+_COMPANION_LANGS = {
+    "go": {"glob": "*.go", "is_test": lambda name: "_test.go" in name},
+    "py": {"glob": "*.py", "is_test": lambda name: name.startswith("test_") or name.endswith("_test.py")},
+}
+
+
 @mcp.tool()
 def missing_companions(
     source_dir: str = "",
+    langs: Optional[list[str]] = None,
     include_empty_semantic: bool = True,
     limit: int = 50,
 ) -> dict:
-    """List Go source files that lack a companion YAML or have empty semantic fields.
+    """List Go/Python source files that lack a companion YAML or have empty semantic fields.
 
-    Scans the source directory for .go files and reports:
-    - 'missing': .go files with no companion .yaml at all
+    Scans the source directory for .go and .py files (per `langs`) and reports:
+    - 'missing': source files with no companion .yaml at all
     - 'incomplete': companion YAMLs exist but category/used_in/related_nodes are all empty
 
     Results are sorted by file size descending (larger = higher priority).
 
     Args:
         source_dir: Override the scan root (default: SOURCE_DIR env or source/).
+        langs: Which source languages to scan. Default: ["go", "py"].
         include_empty_semantic: Also report companions with no semantic fields filled.
         limit: Max entries per category (default 50).
     """
@@ -1192,36 +1200,46 @@ def missing_companions(
     if not scan_root.exists():
         return {"error": f"source_dir not found: {scan_root}"}
 
+    selected = langs or list(_COMPANION_LANGS)
+    unknown = [lang for lang in selected if lang not in _COMPANION_LANGS]
+    if unknown:
+        return {"error": f"unknown lang(s): {unknown}. allowed: {list(_COMPANION_LANGS)}"}
+
     missing: list[dict] = []
     incomplete: list[dict] = []
 
-    for go_file in sorted(scan_root.rglob("*.go")):
-        if "_test.go" in go_file.name:
-            continue
-        companion = go_file.with_suffix(".yaml")
-        rel = str(go_file.relative_to(scan_root))
-        size = go_file.stat().st_size
+    for lang in selected:
+        spec = _COMPANION_LANGS[lang]
+        for src_file in sorted(scan_root.rglob(spec["glob"])):
+            if spec["is_test"](src_file.name):
+                continue
+            companion = src_file.with_suffix(".yaml")
+            rel = str(src_file.relative_to(scan_root))
+            size = src_file.stat().st_size
 
-        if not companion.exists():
-            missing.append({"file": rel, "size": size})
-            continue
+            if not companion.exists():
+                missing.append({"file": rel, "lang": lang, "size": size})
+                continue
 
-        if not include_empty_semantic:
-            continue
+            if not include_empty_semantic:
+                continue
 
-        try:
-            with companion.open() as f:
-                data = _yaml.safe_load(f) or {}
-        except Exception:
-            continue
+            try:
+                with companion.open() as f:
+                    data = _yaml.safe_load(f) or {}
+            except Exception:
+                continue
 
-        cat = data.get("category") or []
-        used = data.get("used_in") or []
-        related = data.get("related_nodes") or []
-        desc = (data.get("description") or "").strip()
+            cat = data.get("category") or []
+            used = data.get("used_in") or []
+            related = data.get("related_nodes") or []
+            desc = (data.get("description") or "").strip()
 
-        if not cat and not used and not related and not desc:
-            incomplete.append({"file": rel, "companion": str(companion.relative_to(scan_root)), "size": size})
+            if not cat and not used and not related and not desc:
+                incomplete.append({
+                    "file": rel, "lang": lang,
+                    "companion": str(companion.relative_to(scan_root)), "size": size,
+                })
 
     missing.sort(key=lambda x: -x["size"])
     incomplete.sort(key=lambda x: -x["size"])

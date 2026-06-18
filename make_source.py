@@ -178,6 +178,93 @@ def process_go_yaml(file_path):
     return chunks
 
 
+def process_py_yaml(file_path):
+    """Process a .py.yaml companion file as structured knowledge chunks.
+
+    Mirrors process_go_yaml: the .py source file is not indexed directly
+    (code excluded by design); this YAML is the sole knowledge source for
+    Python files in the KB.
+
+    Produces one chunk per object defined in the file.
+    File-level metadata (tags, category, used_in) is applied to all chunks.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            return []
+    except (yaml.YAMLError, IOError):
+        return []
+
+    meta = {
+        'tags':          _normalize_list(data.get('tags')),
+        'category':      _normalize_list(data.get('category')),
+        'used_in':       _normalize_list(data.get('used_in')),
+        'related_nodes': _normalize_list(data.get('related_nodes')),
+        'entrypoint':    bool(data.get('entrypoint', False)),
+        'description':   str(data.get('description', '')).strip(),
+    }
+
+    module = data.get('module', '') or os.path.basename(file_path)
+    objects = data.get('objects', [])
+
+    # Module-level chunk: always emitted, aggregates file path + all object names/descriptions
+    py_file = os.path.splitext(file_path)[0] + '.py'
+    mod_lines = [f"module {module}", f"file: {os.path.basename(file_path)}", f"source: {os.path.basename(py_file)}"]
+    if meta['description']:
+        mod_lines.append(meta['description'])
+    if objects:
+        mod_lines.append("contains: " + ", ".join(o.get('name', '') for o in objects))
+        for obj in objects:
+            name = obj.get('name', '')
+            desc = str(obj.get('description', '')).strip()
+            if desc:
+                mod_lines.append(f"{name}: {desc}")
+    chunks = [{
+        'text': '\n'.join(mod_lines), 'file_path': file_path,
+        'section': module, 'start_line': 1, 'end_line': 1,
+        'lang': 'python', 'type': 'py_module', **meta,
+    }]
+
+    if not objects:
+        return chunks
+
+    for i, obj in enumerate(objects):
+        name       = obj.get('name', '')
+        kind       = obj.get('kind', '')
+        receiver   = obj.get('receiver', '')
+        decorators = obj.get('decorators', [])
+        desc       = str(obj.get('description', '')).strip()
+        refs       = obj.get('references', [])
+        impl       = obj.get('implements', [])
+
+        # Build searchable text: signature + description + references
+        sig = f"method ({receiver}) {name}" if receiver else f"{kind} {name}"
+        lines = [sig]
+        if decorators:
+            lines.append(f"decorators: {', '.join(decorators)}")
+        if desc:
+            lines.append(desc)
+        if refs:
+            lines.append(f"references: {', '.join(refs)}")
+        if impl:
+            lines.append(f"implements: {', '.join(impl)}")
+
+        chunk = {
+            'text': '\n'.join(lines),
+            'file_path': file_path,
+            'section': name,
+            'start_line': i + 1,
+            'end_line': i + 1,
+            'lang': 'python',
+            'type': f'py_{kind}' if kind else 'py_object',
+        }
+        chunk.update(meta)
+        chunks.append(chunk)
+
+    return chunks
+
+
 def process_yaml_file(file_path):
     """Processes a YAML file as a single, large chunk to preserve context."""
     try:
@@ -386,12 +473,24 @@ def _is_go_meta_yaml(file_path):
         return False
 
 
+def _is_py_meta_yaml(file_path):
+    """Return True if the YAML file is a Python meta companion (has 'module' + 'objects').
+    Used when the sibling .py file is absent (e.g. in docs-only submodules)."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+        return isinstance(data, dict) and 'module' in data and 'objects' in data
+    except Exception:
+        return False
+
+
 def process_directory(directory_path):
     all_chunks = []
 
     # First pass: classify YAML files by their sibling source file type
     md_companion_yamls = set()   # .yaml next to .md  → merged into md chunks, skip standalone
     go_companion_yamls = set()   # .yaml next to .go  → process via process_go_yaml
+    py_companion_yamls = set()   # .yaml next to .py  → process via process_py_yaml
 
     for root, _, files in os.walk(directory_path):
         for file in files:
@@ -404,6 +503,10 @@ def process_directory(directory_path):
                 candidate = base + '.yaml'
                 if os.path.exists(candidate):
                     go_companion_yamls.add(candidate)
+            elif file.endswith('.py'):
+                candidate = base + '.yaml'
+                if os.path.exists(candidate):
+                    py_companion_yamls.add(candidate)
 
     # Second pass: process files with correct handler
     for root, _, files in os.walk(directory_path):
@@ -414,11 +517,16 @@ def process_directory(directory_path):
             elif file.endswith(('.yaml', '.yml')):
                 if file_path in go_companion_yamls:
                     all_chunks.extend(process_go_yaml(file_path))
+                elif file_path in py_companion_yamls:
+                    all_chunks.extend(process_py_yaml(file_path))
                 elif file_path in md_companion_yamls:
                     pass  # handled by process_md_file
                 elif _is_go_meta_yaml(file_path):
                     # Go meta YAML without sibling .go (e.g. in docs-only submodule)
                     all_chunks.extend(process_go_yaml(file_path))
+                elif _is_py_meta_yaml(file_path):
+                    # Python meta YAML without sibling .py (e.g. in docs-only submodule)
+                    all_chunks.extend(process_py_yaml(file_path))
                 else:
                     all_chunks.extend(process_yaml_file(file_path))
 

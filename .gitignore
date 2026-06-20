@@ -16,3 +16,4 @@
 /kb_data/
 /sqlite_data/*.sqlite
 /sqlite_data/*.sqlite3
+__pycache__/

@@ -67,7 +67,8 @@ make mcp.run     ← mcp-server/server.py (FastMCP, stdio)
 ## Kulcs parancsok
 
 ```bash
-make mcp.config     # .mcp.json generálás (első lépés, repo clone után!)
+make deps           # ./p_venv létrehozása Dockerrel (első lépés, repo clone után — p_venv gitignored!)
+make mcp.config     # .mcp.json generálás
 make kb.build       # Knowledge base generálás a source/ tartalmából
 make mcp.run        # MCP szerver indítás (stdio, Claude Code-hoz)
 make mcp.run.sse    # MCP szerver indítás (SSE/HTTP)

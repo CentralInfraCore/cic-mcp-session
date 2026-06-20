@@ -1,0 +1,298 @@
+apiVersion: cic.session/v1
+kind: SessionIngressEnvelope
+metadata:
+  schema_id: "cic_mcp.session.ingress_envelope_contract"
+  status: experimental
+  created_at: "2026-06-20T20:26:29Z"
+  source_job: "session-ingress-envelope-contract-001"
+  description: >
+    Formal contract for any payload entering the cic-mcp-session raw ingest path
+    (hook, importer, manual entry) BEFORE it is stored in session_raw.*. The envelope
+    wraps a provider payload without interpreting it. See dec-thead-0002:
+    "the hook should not semantically interpret; it should only wrap provider payload
+    into a formal SessionIngressEnvelope."
+
+# ---------------------------------------------------------------------------
+# Top-level required fields
+# ---------------------------------------------------------------------------
+required:
+  - apiVersion
+  - kind
+  - event_id
+  - provider
+  - provider_session_id
+  - source
+  - occurred_at
+  - ingested_at
+  - payload
+  - raw_payload_hash
+  - trust
+  - canonical
+  - interpreted
+  - idempotency_key
+
+properties:
+
+  apiVersion:
+    type: string
+    const: "cic.session/v1"
+    description: >
+      Envelope schema version. Consumers MUST reject envelopes with an
+      unrecognized apiVersion rather than guessing field semantics.
+
+  kind:
+    type: string
+    const: "SessionIngressEnvelope"
+    description: >
+      Fixed discriminator. MUST always be exactly "SessionIngressEnvelope" —
+      this is an ingress-only envelope kind; there is no other kind value.
+
+  # -------------------------------------------------------------------------
+  # Event identity
+  # -------------------------------------------------------------------------
+  event_id:
+    type: string
+    format: uuid
+    description: >
+      Globally unique identifier for this ingress event, generated at
+      wrap-time by the hook/importer/collector (NOT supplied by the
+      provider). Used for log/debug correlation; idempotency itself is
+      governed by idempotency_key (see below), not by event_id, because
+      event_id is allowed to differ across re-deliveries of the same
+      underlying provider event (e.g. retry with new event_id).
+
+  # -------------------------------------------------------------------------
+  # Provider identity
+  # -------------------------------------------------------------------------
+  provider:
+    type: string
+    minLength: 1
+    examples: ["claude-code", "chatgpt-export", "codex-cli", "manual"]
+    description: >
+      Identifies which upstream system produced the raw payload. REQUIRED —
+      an envelope without a known provider cannot be deduplicated or
+      interpreted downstream.
+
+  provider_session_id:
+    type: string
+    minLength: 1
+    description: >
+      The provider's own session/conversation identifier (e.g. Claude Code
+      session_id from the Stop hook, or a ChatGPT conversation id). REQUIRED.
+      This is provider-scoped, not globally unique on its own — uniqueness
+      requires combining with `provider` (see idempotency_key).
+
+  provider_event_name:
+    type: string
+    examples: ["PostToolUse", "PostToolUseFailure", "Stop", "message", "tool_call"]
+    description: >
+      Optional but RECOMMENDED. The provider's own event/hook name, if one
+      exists, preserved verbatim (not normalized/interpreted into a CIC
+      taxonomy at ingress level).
+
+  # -------------------------------------------------------------------------
+  # Source (how it entered the system)
+  # -------------------------------------------------------------------------
+  source:
+    type: object
+    required: [kind, collector]
+    properties:
+      kind:
+        type: string
+        enum: ["hook", "importer", "manual", "api"]
+        description: >
+          ENUM, not free text. Restricts how an envelope may have entered
+          the system to four known ingress paths. Any other value MUST be
+          rejected by validation — this is what makes "trust modell tényleg
+          kikényszerítve van" rather than just documented.
+      collector:
+        type: string
+        minLength: 1
+        examples: ["log-event.py", "chatgpt-importer-v1", "operator"]
+        description: >
+          Identifies the concrete collector/tool instance that produced
+          this envelope (e.g. script name + version), for audit trace.
+    description: >
+      Describes where this envelope came from. REQUIRED object, not a
+      single string, so that ingestion path is structurally distinguishable
+      from provider identity (a hook and a manual entry can share the same
+      provider).
+
+  # -------------------------------------------------------------------------
+  # Timestamps
+  # -------------------------------------------------------------------------
+  occurred_at:
+    type: string
+    format: date-time
+    description: >
+      When the underlying provider event actually happened (provider-side
+      timestamp if available, else collector observation time). RFC3339 UTC.
+
+  ingested_at:
+    type: string
+    format: date-time
+    description: >
+      When the envelope was constructed/wrapped by the collector. RFC3339
+      UTC. MUST be >= occurred_at under normal operation; validators MAY
+      warn (not reject) if ingested_at < occurred_at, since clock skew is
+      possible across distributed collectors.
+
+  # -------------------------------------------------------------------------
+  # Payload (raw, not interpreted)
+  # -------------------------------------------------------------------------
+  payload:
+    type: object
+    description: >
+      The raw provider payload, stored AS-IS (structurally preserved, not
+      semantically summarized or reduced). For unstructured/binary providers
+      this MAY be a wrapper object with a `raw_text` or `raw_base64` field,
+      but the original payload structure or content MUST NOT be discarded
+      or replaced by a derived summary at ingress level. Contrast with
+      log-event.py's `summarize()`, which truncates `cmd` to 100 chars and
+      keeps only `ok`/`error`/`file` — SessionIngressEnvelope.payload is
+      explicitly required to be richer than that (see contract report,
+      "log-event.py gap" section).
+
+  payload_encoding:
+    type: string
+    enum: ["json", "text", "base64"]
+    default: "json"
+    description: >
+      How `payload` (or its raw_text/raw_base64 sub-field) is encoded.
+      ENUM, not free text — prevents silent ambiguity about whether payload
+      bytes need further decoding before storage.
+
+  raw_payload_hash:
+    type: string
+    pattern: "^sha256:[a-f0-9]{64}$"
+    description: >
+      SHA-256 hash of the raw, canonicalized payload bytes, prefixed with
+      "sha256:". REQUIRED. This is the raw-preservation integrity proof:
+      any downstream consumer can verify the stored payload has not been
+      mutated by recomputing this hash. Also a primary input to the
+      idempotency_key (see below).
+
+  # -------------------------------------------------------------------------
+  # Trust fields (enum-constrained, not free text)
+  # -------------------------------------------------------------------------
+  trust:
+    type: string
+    enum: ["session_local", "session_derived"]
+    description: >
+      ENUM restricted to the two trust levels valid for the session ingress
+      layer (architecture.md "Trust modell": session.trust = session_local /
+      session_derived). Any other value (e.g. "canonical", "reviewed",
+      "shared") MUST be rejected by validation at this layer — those values
+      belong to other trust domains (knowledge/shared), not session ingress.
+
+  canonical:
+    type: boolean
+    const: false
+    description: >
+      MUST always be false for any SessionIngressEnvelope. This is a JSON
+      Schema `const: false`, not merely a documented convention — a
+      validator implementing this schema literally cannot accept
+      canonical=true on an ingress envelope. See "Forbidden combination 1"
+      below and dec-thead-0001 (session is not a canonical knowledge graph).
+
+  interpreted:
+    type: boolean
+    const: false
+    description: >
+      MUST always be false for any SessionIngressEnvelope. Also a literal
+      `const: false`, enforcing dec-thead-0002: the hook/collector wraps,
+      it does not semantically interpret. There is no field combination
+      under which an ingress envelope may declare interpreted=true — this
+      schema does not expose interpreted as a free boolean at all; it is a
+      pinned constant. Promotion to an interpreted record happens in a
+      DIFFERENT schema/object downstream (session_core projection), never
+      by mutating this field on the ingress envelope itself.
+
+  # -------------------------------------------------------------------------
+  # Idempotency
+  # -------------------------------------------------------------------------
+  idempotency_key:
+    type: string
+    pattern: "^sha256:[a-f0-9]{64}$"
+    description: >
+      Deterministic SHA-256 hash, prefixed "sha256:", computed as:
+
+        idempotency_key = sha256(
+          provider + "\x1f" +
+          provider_session_id + "\x1f" +
+          (provider_event_name or "") + "\x1f" +
+          occurred_at + "\x1f" +
+          raw_payload_hash
+        )
+
+      Field order is fixed; fields are joined with the ASCII unit separator
+      (0x1F) to avoid ambiguous concatenation collisions, then hashed once.
+      occurred_at MUST be normalized to RFC3339 UTC with second precision
+      before hashing. raw_payload_hash (not the raw payload itself) is used
+      as the payload component, so the key computation does not require
+      re-serializing potentially large payloads.
+
+      Rationale for field choice: provider + provider_session_id scope the
+      key to one provider-session pair (two providers MAY reuse the same
+      session id string without colliding); provider_event_name distinguishes
+      same-timestamp events of different kinds; occurred_at distinguishes
+      genuinely repeated actions; raw_payload_hash is the final tie-breaker
+      so that two distinct payloads at the same second never collide, and
+      identical re-deliveries of the same provider event always produce the
+      same key regardless of event_id or ingested_at (both excluded from
+      the hash on purpose, since they are allowed to vary across retries).
+
+      A session_raw ingest MUST treat idempotency_key as a unique constraint:
+      a second envelope with the same idempotency_key is a no-op (or upsert
+      of ingestion metadata only), never a duplicate raw row.
+
+  # -------------------------------------------------------------------------
+  # Optional contextual fields
+  # -------------------------------------------------------------------------
+  workstream:
+    type: string
+    description: >
+      Optional free-text linkage to a CIC job_id / workstream, if known at
+      ingest time (e.g. CIC_JOB_ID env var seen by the collector). Not
+      required, since not every provider event has a workstream context.
+
+  schema_notes:
+    type: string
+    description: >
+      Optional free-text field for collector-specific notes about partial
+      or truncated capture (e.g. "payload truncated by provider transport
+      limit"). MUST NOT be used to encode interpreted/semantic content.
+
+# ---------------------------------------------------------------------------
+# Forbidden combinations — validation rules (explicit, not just documentation)
+# ---------------------------------------------------------------------------
+forbidden_combinations:
+  - id: forbidden-canonical-true
+    rule: "canonical == true"
+    enforcement: "JSON Schema const:false on `canonical` — schema-level rejection, not a runtime check."
+    rationale: >
+      An ingress-level SessionIngressEnvelope MUST NOT ever assert
+      canonical=true. Canonical truth belongs to the knowledge layer only,
+      after human review/promotion (architecture.md "Trust modell":
+      knowledge.canonical = true only after review/promotion).
+  - id: forbidden-interpreted-true
+    rule: "interpreted == true"
+    enforcement: "JSON Schema const:false on `interpreted` — schema-level rejection, not a runtime check."
+    rationale: >
+      The hook/collector that produces a SessionIngressEnvelope MUST NOT
+      perform semantic interpretation (decision/claim extraction). Per
+      dec-thead-0002, only wrapping is allowed at this layer.
+  - id: forbidden-trust-out-of-domain
+    rule: "trust not in ['session_local', 'session_derived']"
+    enforcement: "JSON Schema enum on `trust` — values like 'canonical', 'reviewed', 'shared' rejected at schema validation."
+    rationale: >
+      Prevents an envelope from borrowing trust vocabulary from the
+      knowledge or shared layers, which would blur the trust-domain
+      boundary documented in architecture.md.
+  - id: forbidden-source-kind-unknown
+    rule: "source.kind not in ['hook', 'importer', 'manual', 'api']"
+    enforcement: "JSON Schema enum on `source.kind`."
+    rationale: >
+      Ingress path must be one of the four known, auditable paths; an
+      unknown ingestion path cannot be trusted with a known provenance
+      classification.

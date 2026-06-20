@@ -302,7 +302,10 @@ def build_faiss_index(embeddings):
     return index
 
 def build_bm25_index(chunks):
-    """Build BM25 index for lexical search."""
+    """Build BM25 index for lexical search. Returns None for an empty corpus
+    instead of letting BM25Okapi divide by a zero corpus_size."""
+    if not chunks:
+        return None
     tokenized = [tokenize(chunk['text']) or [""] for chunk in chunks]
     return BM25Okapi(tokenized)
 
@@ -538,6 +541,20 @@ def build_knowledge_base(source_directory, model_name=EMBEDDING_MODEL):
     chunks_list.sort(key=lambda x: (x['file_path'], x['start_line']))
     for i, chunk in enumerate(chunks_list):
         chunk['id'] = f'c{i+1}'
+
+    if not chunks_list:
+        print(f"WARNING: '{source_directory}' has no indexable content — generating an empty knowledge base instead of failing.")
+        return {
+            "chunks": {},
+            "nodes": {},
+            "edges": {},
+            "inverted_index": {},
+            "metadata_index": build_metadata_index([]),
+            "bm25": None,
+            "bm25_chunk_ids": [],
+            "faiss_index": None,
+            "model_name": model_name,
+        }
 
     texts = [chunk['text'] for chunk in chunks_list]
 

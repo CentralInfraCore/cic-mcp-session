@@ -4,7 +4,7 @@
 include mk/infra.mk
 
 # ---- Phony ----
-.PHONY: all help validate release-check release-prepare release-close test up down shell build fmt lint check typecheck repo.init manifest-verify manifest-update kb.gitmodules kb.gitmodules.check kb.build mcp.run mcp.run.sse mcp.config
+.PHONY: all help validate release-check release-prepare release-close test up down shell build fmt lint check typecheck repo.init manifest-verify manifest-update deps kb.gitmodules kb.gitmodules.check kb.build mcp.run mcp.run.sse mcp.config
 
 # Default to showing help
 all: help
@@ -132,6 +132,7 @@ repo.init: infra.repo.init
 # Knowledge Base & MCP Server (p_venv based, no Docker)
 # =============================================================================
 
+deps: infra.deps
 kb.gitmodules: infra.kb.gitmodules
 kb.gitmodules.check: infra.kb.gitmodules.check
 kb.build: infra.kb.build
@@ -188,6 +189,7 @@ help:
 	@echo "  repo.init     Set up the Git hooks for this repository."
 	@echo ""
 	@echo "Knowledge Base & MCP Server:"
+	@echo "  deps          (Re)generate requirements.txt and install deps into ./p_venv (run first!)."
 	@echo "  mcp.config    Generate .mcp.json with correct paths for this repo."
 	@echo "  kb.build      Build the knowledge base from ./source."
 	@echo "  mcp.run       Start the MCP server (stdio)."

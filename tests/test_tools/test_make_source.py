@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 from make_source import (
     build_bm25_index,
     build_faiss_index,
+    build_knowledge_base,
     create_bm25_inverted_index,
     create_knowledge_graph_with_content,
     process_md_file,
@@ -56,6 +57,30 @@ class TestBuildBm25Index:
         from rank_bm25 import BM25Okapi
         bm25 = build_bm25_index([{"id": "c1", "text": ""}])
         assert isinstance(bm25, BM25Okapi)
+
+    def test_empty_corpus_returns_none_without_raising(self):
+        # Regression: BM25Okapi divides by corpus_size internally, which raised
+        # ZeroDivisionError for an empty chunk list (empty/freshly-seeded source/).
+        assert build_bm25_index([]) is None
+
+
+# ---------------------------------------------------------------------------
+# build_knowledge_base — empty source/ regression
+# ---------------------------------------------------------------------------
+
+class TestBuildKnowledgeBaseEmptySource:
+    def test_empty_source_directory_returns_empty_kb_without_raising(self):
+        with tempfile.TemporaryDirectory() as empty_dir:
+            kb = build_knowledge_base(empty_dir)
+
+        assert kb["chunks"] == {}
+        assert kb["nodes"] == {}
+        assert kb["edges"] == {}
+        assert kb["bm25"] is None
+        assert kb["bm25_chunk_ids"] == []
+        assert kb["faiss_index"] is None
+        assert kb["inverted_index"] == {}
+        assert kb["metadata_index"]["entrypoint_ids"] == []
 
 
 # ---------------------------------------------------------------------------

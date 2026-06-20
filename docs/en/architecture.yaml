@@ -1,86 +1,71 @@
 ---
-title: System Architecture Overview
+title: System Architecture Overview — cic-mcp-session
 description: >
-  Provides a high-level overview of the project's architecture and
-  operational philosophy.
+  Provides a high-level overview of the cic-mcp-session component's architecture and
+  its role within the cic-mcp-* family.
 
 concepts:
-  - name: The "Template Factory" Concept
+  - name: The "Session layer" concept
     summary: >
-      This repository is a 'Template Factory' that produces templates for
-      creating other repositories.
-    components:
-      - type: Template Repo
-        description: >
-          The "source of truth" for CI/CD processes, release logic, and common
-          configurations.
-        repo: base-repo (this repo)
-      - type: Production Repo
-        description: >
-          A repository derived from a template, containing specific business
-          logic.
+      This component stores and serves a single conversation/session scope over MCP —
+      not canonical knowledge, not cross-session memory.
+    component_map:
+      - id: cic-mcp-knowledge
+        role: reviewed/canonical knowledge, versioned
+      - id: cic-mcp-workdir
+        role: "current repo/worktree/branch/diff (role filled by cic-factory)"
+      - id: cic-mcp-session
+        role: "session-scope event, timeline, chunk, retrieval, provenance — THIS REPO"
+      - id: cic-mcp-shared
+        role: cross-session memory, weighting, conflict
+      - id: cic-mcp-gateway
+        role: trust-domain aware context compiler
+      - id: cic-mcp-factory
+        role: the family's capability production/maintenance factory
 
-  - name: The Repository Ecosystem
+  - name: Boundaries
+    summary: What belongs to the session layer's responsibility, and what does not.
+    yes:
+      - SessionIngressEnvelope ingest
+      - raw event store
+      - turn/timeline projection
+      - chunk store
+      - source/provenance refs
+      - metadata index, full-text search, vector search
+      - session-scope context pack
+      - stable SQL/API/MCP read tools
+    no:
+      - canonical knowledge
+      - shared memory
+      - cross-session graph
+      - final decision mining
+      - promotion without human review
+
+  - name: Trust model
+    summary: The session layer's trust marking.
+    trust:
+      canonical: false
+      promotion_allowed: false
+      interpreted: false   # at ingress/raw level
+      default_scope: session_id
+      cross_session: false
+
+  - name: Planned data flow (Postgres-first, not yet implemented)
     summary: >
-      The system consists of multiple interconnected repositories. Updates
-      automatically propagate from the template repo to the production repos.
+      SessionIngressEnvelope -> session_raw -> session_core -> session_idx -> session_api ->
+      MCP read tools. The trigger layer must never call an LLM or HTTP.
     diagram: |
       graph TD
-          A[Template Repo (base-repo)] -- "Updated by Renovate" --> B(Production Repo 1);
-          A -- "Updated by Renovate" --> C(Production Repo 2);
-          A -- "Updated by Renovate" --> D(Production Repo N);
+          A[SessionIngressEnvelope] --> B[session_raw - raw event store]
+          B --> C[session_core - turn/timeline projection, chunk store]
+          C --> D[session_idx - FTS, vector, metadata index]
+          D --> E[session_api - stable SQL functions]
+          E --> F[MCP read tools - context pack]
 
-  - name: "The Automation Engine: Renovate"
+  - name: Current state
     summary: >
-      Renovate monitors the release tags of the template repository and
-      automatically opens Pull Requests (PRs) on production repos.
-    details:
-      - >
-        Ensures that centralized logic (e.g., a security fix) is automatically
-        and consistently propagated to all products.
-
-  - name: The Role of the Unified Compiler (compiler.py)
-    summary: >
-      The system uses a single, unified `compiler.py` script with a dual role
-      depending on the execution context.
-    roles:
-      - role: Template Maintainer
-        context: When run in `base-repo`
-        responsibility: Maintaining and versioning the template repository.
-        task: >
-          Validating and "finalizing" the central `project.yaml` configuration
-          file when releasing a new version of the template.
-      - role: Product Manufacturer
-        context: When run in a derived production repo
-        responsibility: The "payload" of the template.
-        task: >
-          Creating a digitally signed and notarized "artifact" from a specific
-          source file during the production repo's own release process.
-    conclusion: >
-      This unified approach ensures that production repositories always use the
-      exact same logic and tools.
-
-  - name: The Path of Changes and the Branching Model
-    summary: >
-      Changes follow a strictly defined path through the systems.
-    diagram: |
-      graph LR
-          subgraph "Template Repo (base-repo)"
-              T_MAIN[main] -- "release tag" --> T_REL(v1.2.0);
-              T_DF[df/feature] --> T_MAIN;
-              T_SCHEMAS[schemas/f/1] -- "specializáció" --> T_MAIN;
-          end
-
-          subgraph "Production Repo"
-              P_MAIN[main];
-              P_DF[df/feature];
-              T_REL -- "Renovate PR" --> P_DF;
-              P_DF -- "merge" --> P_MAIN;
-          end
-
-          style T_REL fill:#f9f,stroke:#333,stroke-width:2px
-    steps:
-      - "1. Development in the Template Repo: On `df/xxx` branches."
-      - "2. Template Release: A new `release` tag is created from the `main` branch."
-      - "3. Propagation: Renovate opens a PR on the `df/xxx` branches of production repos."
-      - "4. Integration into the Product: Developers merge the update into their work, then to the `main` branch."
+      The repo was bootstrapped from the base-repo mcp/main MCP server scaffold
+      (2026-06-20); no session-specific content is implemented yet.
+    next_capability_jobs:
+      - session-ingress-envelope-contract-001
+      - session-postgres-storage-design-001

@@ -1,8 +1,54 @@
-# CLAUDE.md — CentralInfraCore MCP Base
+# CLAUDE.md — cic-mcp-session
 
 ## Mi ez a repo?
 
-Ez a **CentralInfraCore MCP base template** — egy alap Git repo amit git remote merge-vel raknak rá más CIC-ből származó repokra. Nem önálló termék, hanem template: a belőle levont repok öröklik az MCP szerver infrastruktúráját, a build tooling-ot és a release folyamatot.
+Ez a `cic-mcp-*` család **session rétege**: egyetlen beszélgetés/session-scope esemény-, idővonal-,
+chunk- és provenance-tár, amit a CIC agent-ek MCP-n keresztül érnek el.
+
+A repo a `base-repo` `mcp/main` specializációs branch-éből lett bootstrapelve (`base-repo` remote
+tartósan bekötve, ld. `git remote -v` — jövőbeli `mcp/main` frissítés újra mergelhető). Az MCP
+szerver infrastruktúra, a build tooling és a release folyamat innen öröklődik — de a tartalom
+(amit a `source/` alá töltünk, és amit a KB épít) session-specifikus lesz, nem generikus template.
+
+## Fő határok (a `cic-mcp-factory/factory-docs/architecture.md` szerint)
+
+**Igen:**
+- `SessionIngressEnvelope` ingest
+- raw event store
+- turn/timeline projection
+- chunk store
+- source/provenance refs
+- metadata index, full-text search, vector search
+- session-scope context pack
+- stabil SQL/API/MCP read tools
+
+**Nem:**
+- canonical tudás
+- shared memory
+- cross-session graph
+- végleges döntésbányászat
+- human review nélküli promotion
+
+## Trust modell
+
+```yaml
+canonical: false
+promotion_allowed: false
+interpreted: false   # ingress/raw szinten
+default_scope: session_id
+cross_session: false
+```
+
+A session réteg sosem állít elő canonical tényt. A hook csak formalizál
+(`SessionIngressEnvelope`-ba), szemantikai értelmezést (decision/claim extraction) nem végez —
+az queue/DB/worker oldali feldolgozás, nem ingress-szintű feladat.
+
+## Jelenlegi állapot
+
+`experimental`, nincs még session-specifikus implementáció — a `make_source.py`/`mcp-server/`
+scaffold a `base-repo` MCP-template öröksége, `source/` üres. Az első capability-jobok
+(`session-repo-baseline-audit-001` → bootstrap, `session-ingress-envelope-contract-001`,
+`session-postgres-storage-design-001`) a `cic-mcp-factory/jobs/` alól indulnak.
 
 ## MCP szerver
 
@@ -181,6 +227,9 @@ Ha a feladat fogalmi megértés (nem implementáció, nem audit):
 
 ## Kapcsolódó rendszerek
 
+- **cic-mcp-factory**: a komponens capability-jobjainak gyártó/karbantartó factory-ja
+- **cic-mcp-knowledge**: canonical réteg — ide csak emberi review után, soha automatikusan nem promote-olunk
+- **cic-mcp-gateway**: ez a réteg fogja a session-source-ot adapterként fogyasztani (`session.context_pack` → `GatewayContextEnvelope`)
 - **CIC-Relay**: Go-alapú control plane (Nexus orchestrator, WASM)
 - **CIC-Schemas**: Schema compiler és Vault signing
 - **CIC-Registry**: 3-rétegű registry (schemas/mods/agents)

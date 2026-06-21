@@ -1,0 +1,28 @@
+# cic-session-worker-loop.timer
+#
+# DOCUMENTED DEPLOYMENT ARTIFACT — NOT DEPLOYED.
+#
+# Paired with cic-session-worker-loop.service (sibling file in this
+# directory). NOT installed, NOT enabled, NOT running anywhere — see the
+# disclaimer at the top of cic-session-worker-loop.service; the same
+# statement applies here unchanged. The cic-mcp-session repo has no live
+# production Postgres instance, so there is no real target for this timer
+# to schedule against yet.
+#
+# Intended install path: /etc/systemd/system/cic-session-worker-loop.timer
+#
+# OnUnitActiveSec=10s is a DOCUMENTATION placeholder, not a tuned production
+# interval — input.md "Nem cél" explicitly scopes out determining/tuning the
+# real production --interval-seconds/schedule value for this job.
+
+[Unit]
+Description=Run cic-session-worker-loop.service on a recurring schedule
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10s
+Unit=cic-session-worker-loop.service
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

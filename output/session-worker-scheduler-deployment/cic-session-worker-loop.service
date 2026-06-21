@@ -1,0 +1,49 @@
+# cic-session-worker-loop.service
+#
+# DOCUMENTED DEPLOYMENT ARTIFACT — NOT DEPLOYED.
+#
+# This unit is a documented intended-production deployment mechanism for
+# session_store.worker_loop, written as part of job
+# session-worker-scheduler-001. It is NOT installed, NOT enabled, and NOT
+# running anywhere. The cic-mcp-session repo currently has NO live
+# production Postgres instance — there is nowhere for this unit to point at
+# yet. Treat this file purely as documentation of how the loop WOULD be run
+# once such an instance exists, not as evidence that it IS running.
+#
+# Intended install path: /etc/systemd/system/cic-session-worker-loop.service
+# Paired with: cic-session-worker-loop.timer (see sibling file in this
+# directory) — the .service has Type=oneshot and is triggered by the timer,
+# rather than running as a long-lived unbounded process, so that each run is
+# a single bounded --max-iterations=1 pass with normal systemd
+# start/stop/journal semantics per invocation.
+
+[Unit]
+Description=CIC session_store worker_loop (one bounded pass: projection + indexing)
+# Document the real dependency explicitly, even though no such target unit
+# exists yet in any real deployment (see disclaimer above).
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+User=cic-session
+Group=cic-session
+WorkingDirectory=/opt/cic-mcp-session
+
+# Run exactly ONE iteration per invocation; the systemd timer (not an
+# internal infinite loop) is what provides the recurring schedule. This
+# keeps each run's logs/exit-code in the systemd journal per-invocation,
+# and avoids the loop module owning unbounded interval decisions in
+# production (input.md "Nem cél": "a --interval-seconds valós
+# production-értékének meghatározása/hangolása" is explicitly out of scope
+# for this job; the operator wires the schedule via the .timer instead).
+ExecStart=/opt/cic-mcp-session/p_venv/bin/python -m session_store.worker_loop --max-iterations 1
+
+# Connection parameters: supply via EnvironmentFile, NOT inline here, so
+# credentials are not committed to a unit file under version control.
+EnvironmentFile=-/etc/cic-session/worker-loop.env
+
+# Minimal hardening; not exhaustive (monitoring/alerting integration is
+# explicitly out of scope for this job — see input.md "Nem cél").
+NoNewPrivileges=true
+PrivateTmp=true

@@ -1,12 +1,14 @@
 """
 Outbox-worker for session_jobs.outbox (job_type='index_turn') ->
-session_core.chunks / session_idx.chunk_fts / session_idx.chunk_embeddings.
+session_core.chunks / session_idx.chunk_fts / session_idx.chunk_embeddings /
+session_core.source_refs.
 
-Job: session-chunk-indexer-001
+Job: session-chunk-indexer-001 (chunks/fts/embeddings), extended by
+session-source-refs-extractor-001 (source_refs).
 
 Source of truth for the table DDL:
   output/session-postgres-schema.sql (session_core.chunks, session_idx.chunk_fts,
-  session_idx.chunk_embeddings, session_jobs.outbox)
+  session_idx.chunk_embeddings, session_jobs.outbox, session_core.source_refs)
   output/session-chunk-indexer-migration.sql (the 'index_turn' outbox job_type,
   the AFTER INSERT trigger on session_core.turns that enqueues it, and the
   VECTOR(1536) -> VECTOR(384) dimension correction)
@@ -25,9 +27,10 @@ session_store runtime path):
 Scope: this module ONLY reads pending/failed session_jobs.outbox rows with
 job_type='index_turn', reads the referenced session_core.turns row, derives
 1+ deterministic text chunks from turns.content, writes session_core.chunks,
-session_idx.chunk_fts (to_tsvector), and session_idx.chunk_embeddings (local
-sentence-transformers model), and closes the outbox row (done/failed/
-dead_letter). It does NOT populate session_core.source_refs or
+session_idx.chunk_fts (to_tsvector), session_idx.chunk_embeddings (local
+sentence-transformers model), and session_core.source_refs (deterministic
+key-/regex-based provenance extraction — see "Source-ref extraction" below),
+and closes the outbox row (done/failed/dead_letter). It does NOT populate
 session_idx.ranking_features, does NOT evaluate retrieval quality via
 session_api.search_context(), does NOT implement multi-worker
 locking/claiming beyond the single-worker-instance assumption
@@ -40,12 +43,83 @@ timer is wired in — see input.md "Nem cél"). Only this job's own pytest
 suite (tests/test_session_store/test_chunk_indexer.py) and the CLI entry
 point below (`python -m session_store.chunk_indexer`) invoke
 run_indexing_batch().
+
+---------------------------------------------------------------------------
+Source-ref extraction (session-source-refs-extractor-001)
+---------------------------------------------------------------------------
+
+extract_source_refs() is a PURE, deterministic, key-/regex-matching
+function — NOT an AI/LLM call, NOT semantic interpretation — that derives
+zero or more (ref_kind, ref_value) provenance references from a single
+turn's (role, content, text). It is called from _index_one_job(),
+immediately AFTER a chunk is inserted (_insert_chunk()), inside that SAME
+per-row transaction — there is no new outbox job_type/trigger for this; the
+chunk_id FK that session_core.source_refs requires only exists once the
+chunk row itself has been inserted in this transaction, so reusing the
+existing index_turn per-row transaction is the only place this can happen
+without inventing new outbox machinery (input.md "Fontos architekturális
+döntés").
+
+Three rules, applied independently (a single turn can produce refs from
+more than one rule):
+
+  1. ref_kind='tool_call': role == 'tool' AND content (a JSONB dict) has a
+     'tool_name' key -> one row, ref_value = str(content['tool_name']).
+     Rationale for the key name: 'tool_name' is the one tool-identifying
+     key actually used elsewhere in this codebase's test fixtures/docs as
+     the canonical "which tool" field on a tool-shaped payload (input.md
+     "2." explicitly names 'tool_name' as the example key) — no other
+     candidate key (e.g. 'name', 'tool') appears anywhere in this repo's
+     schema/docs, so 'tool_name' is the only non-arbitrary choice available
+     without inventing a new convention.
+  2. ref_kind='file': content (or its nested 'tool_input' dict, if
+     present) has one of FILE_PATH_KEYS -> one row per matching key found,
+     ref_value = str(value). Checked on both the top-level content dict AND
+     content['tool_input'] (if that nested dict exists), because a
+     tool-call-shaped payload conventionally nests its arguments under
+     'tool_input' (mirrors how PreToolUse/PostToolUse-shaped hook payloads
+     are commonly structured — see turn_projector.PROVIDER_EVENT_NAME_TO_ROLE
+     mapping these event names to role='tool') while a plain payload may
+     carry the same key at the top level; checking both locations with the
+     same fixed key list avoids needing two separate rule definitions.
+     FILE_PATH_KEYS = ('file_path', 'path', 'notebook_path') — three
+     concrete, observed key spellings (input.md "2." names all three
+     explicitly), not a fuzzy "anything that looks like a path" heuristic.
+  3. ref_kind='url': a fixed regex (URL_PATTERN, r'https?://\\S+') applied
+     to the CHUNK'S text (the already-extracted/chunked text this rule
+     receives as its `text` parameter), NOT the raw turns.content payload
+     — one row per regex match (re.findall), so a turn with N distinct
+     URLs in its text produces N rows. Matching against chunk text (not the
+     raw JSONB payload) is the explicit input.md "2." requirement ("a
+     CHUNK SZÖVEGÉBEN (nem a raw payload-ban)"); since chunking can split
+     one turn's text into multiple pieces, this rule is invoked once per
+     chunk piece (inside the existing per-chunk loop in _index_one_job),
+     so a URL is correctly attributed to the chunk_id whose text actually
+     contains it, never to a different chunk of the same turn.
+
+None of these three rules involves any LLM/AI judgment call, network
+request, or non-deterministic state — same input always yields the same
+output list, in the same order (tool_call rule first, then file rule, then
+url rule, each appending zero or more tuples in a fixed, documented order).
+
+content_hash (session_core.source_refs.content_hash) is sha256(ref_value
+.encode("utf-8")).hexdigest(), NOT the chunk's own content_hash and NOT a
+hash of the whole turn — input.md "3." explicitly allows "sha256 az
+ref_value-ból, vagy indokold más választásodat"; hashing ref_value directly
+was chosen (not, say, hashing (ref_kind, ref_value) together) because
+ref_value alone is the unique payload of a provenance pointer (a file path,
+a URL, a tool name) that a future dedup/lookup pass would want to match on
+across rows independent of which ref_kind first observed that exact string
+— see report "Decisions Proposed" for the full rationale and the rejected
+"hash the whole row" alternative.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -56,6 +130,17 @@ from session_store.envelope_writer import SessionStoreConfig
 logger = logging.getLogger(__name__)
 
 OUTBOX_JOB_TYPE = "index_turn"
+
+# ---------------------------------------------------------------------------
+# Source-ref extraction rules (input.md "2. Determinisztikus kinyerési
+# szabályok") — see module docstring "Source-ref extraction" for the full
+# rationale of each key/pattern choice.
+# ---------------------------------------------------------------------------
+TOOL_CALL_ROLE = "tool"
+TOOL_NAME_KEY = "tool_name"
+FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
+NESTED_TOOL_INPUT_KEY = "tool_input"
+URL_PATTERN = re.compile(r"https?://\S+")
 
 # ---------------------------------------------------------------------------
 # Embedding model (input.md: "konzisztencia kedvéért" with make_source.py's
@@ -176,6 +261,62 @@ def split_into_chunks(text: str) -> list[str]:
     return chunks
 
 
+def _extract_file_refs_from_dict(d: dict) -> list[tuple[str, str]]:
+    """Scan a single dict (not recursively) for FILE_PATH_KEYS, in fixed order.
+
+    Helper for extract_source_refs() rule 2 — kept separate so the same
+    scan logic can be applied to both `content` and `content['tool_input']`
+    without duplicating the key-iteration loop.
+    """
+    refs: list[tuple[str, str]] = []
+    for key in FILE_PATH_KEYS:
+        if key in d and d[key] is not None:
+            refs.append(("file", str(d[key])))
+    return refs
+
+
+def extract_source_refs(role: str, content, text: str) -> list[tuple[str, str]]:
+    """Deterministically derive provenance (ref_kind, ref_value) pairs.
+
+    Pure function, no I/O, no AI/LLM call — see module docstring "Source-ref
+    extraction" for the full rationale of each rule. Always returns a list
+    (possibly empty); never raises for the documented input shapes (a
+    non-dict `content` simply yields no tool_call/file rows, since rules 1
+    and 2 only look for keys inside a dict).
+
+    Rule order (fixed, deterministic — same input always produces the same
+    output list in the same order):
+      1. tool_call: role == 'tool' and content (dict) has 'tool_name'.
+      2. file: content (dict) and/or content['tool_input'] (nested dict)
+         has one of FILE_PATH_KEYS, in FILE_PATH_KEYS order; content-level
+         matches are appended before tool_input-level matches.
+      3. url: every regex match of URL_PATTERN against `text`, in the order
+         they appear in the string (re.findall's documented left-to-right
+         order).
+    """
+    refs: list[tuple[str, str]] = []
+
+    is_dict = isinstance(content, dict)
+
+    # Rule 1: tool_call.
+    if role == TOOL_CALL_ROLE and is_dict and content.get(TOOL_NAME_KEY) is not None:
+        refs.append(("tool_call", str(content[TOOL_NAME_KEY])))
+
+    # Rule 2: file — checked on content itself, then on content['tool_input']
+    # if that nested dict is present (see module docstring rule 2 rationale).
+    if is_dict:
+        refs.extend(_extract_file_refs_from_dict(content))
+        nested = content.get(NESTED_TOOL_INPUT_KEY)
+        if isinstance(nested, dict):
+            refs.extend(_extract_file_refs_from_dict(nested))
+
+    # Rule 3: url — against the chunk TEXT, not the raw payload.
+    for match in URL_PATTERN.findall(text or ""):
+        refs.append(("url", match))
+
+    return refs
+
+
 @lru_cache(maxsize=1)
 def _get_embedding_model(model_name: str = EMBEDDING_MODEL):
     """Lazily load and cache the SentenceTransformer model (process-wide).
@@ -213,6 +354,7 @@ class IndexingResult:
     job_id: int
     outcome: str  # 'done' | 'failed' | 'dead_letter'
     chunk_count: int = 0
+    source_ref_count: int = 0
     error: str | None = None
 
 
@@ -238,9 +380,19 @@ def _fetch_pending_jobs(cur: psycopg.Cursor) -> list[tuple]:
 
 
 def _fetch_turn(cur: psycopg.Cursor, turn_id: int) -> tuple | None:
+    """Fetch the turn row needed for chunking + source-ref extraction.
+
+    `role` is selected alongside turn_id/session_id/content (extended by
+    session-source-refs-extractor-001 — input.md "3."): session_core.turns
+    .role is the deterministic signal turn_projector.map_role() already
+    computed and persisted at projection time ('tool', 'assistant', 'user',
+    'system', 'manual', or 'event' — see turn_projector.py module docstring
+    "Role mapping"), so extract_source_refs() can use it directly for rule
+    1 (tool_call) without re-deriving provider_event_name from anywhere.
+    """
     cur.execute(
         """
-        SELECT turn_id, session_id, content
+        SELECT turn_id, session_id, content, role
         FROM session_core.turns
         WHERE turn_id = %s
         """,
@@ -298,6 +450,23 @@ def _insert_chunk_embedding(
     )
 
 
+def _insert_source_ref(cur: psycopg.Cursor, chunk_id: int, ref_kind: str, ref_value: str) -> None:
+    """Insert one session_core.source_refs row for a single extracted ref.
+
+    content_hash = sha256(ref_value.encode("utf-8")).hexdigest() — see
+    module docstring "Source-ref extraction" for why ref_value alone (not
+    the whole row, not the chunk's own content) is hashed.
+    """
+    content_hash = hashlib.sha256(ref_value.encode("utf-8")).hexdigest()
+    cur.execute(
+        """
+        INSERT INTO session_core.source_refs (chunk_id, ref_kind, ref_value, content_hash)
+        VALUES (%s, %s, %s, %s)
+        """,
+        (chunk_id, ref_kind, ref_value, content_hash),
+    )
+
+
 def _mark_done(cur: psycopg.Cursor, job_id: int) -> None:
     cur.execute(
         """
@@ -336,6 +505,15 @@ def _index_one_job(
     turn_id) cannot poison the batch or roll back already-completed
     indexing of other rows; any exception is caught and turned into a
     failed/dead_letter outbox update rather than propagating.
+
+    Source-ref extraction (session-source-refs-extractor-001): for each
+    chunk, IMMEDIATELY after _insert_chunk() returns its chunk_id (same
+    per-row transaction, no new outbox job_type — see module docstring
+    "Source-ref extraction"), extract_source_refs() is called with that
+    chunk's own (role, content, text), and one session_core.source_refs row
+    is inserted per returned (ref_kind, ref_value) tuple via
+    _insert_source_ref(). A turn with zero extractable refs across all its
+    chunks simply inserts zero source_refs rows — not an error.
     """
     try:
         with conn.transaction():
@@ -345,12 +523,13 @@ def _index_one_job(
                     raise LookupError(
                         f"session_core.turns row not found for source_id={source_id}"
                     )
-                turn_id, session_id, content = turn
+                turn_id, session_id, content, role = turn
 
                 text = extract_text(content)
                 pieces = split_into_chunks(text)
 
                 chunk_count = 0
+                source_ref_count = 0
                 for chunk_seq, piece in enumerate(pieces, start=1):
                     token_count = estimate_token_count(piece)
                     chunk_id = _insert_chunk(
@@ -361,8 +540,17 @@ def _index_one_job(
                     _insert_chunk_embedding(cur, chunk_id, embedding, EMBEDDING_MODEL)
                     chunk_count += 1
 
+                    for ref_kind, ref_value in extract_source_refs(role, content, piece):
+                        _insert_source_ref(cur, chunk_id, ref_kind, ref_value)
+                        source_ref_count += 1
+
                 _mark_done(cur, job_id)
-        return IndexingResult(job_id=job_id, outcome="done", chunk_count=chunk_count)
+        return IndexingResult(
+            job_id=job_id,
+            outcome="done",
+            chunk_count=chunk_count,
+            source_ref_count=source_ref_count,
+        )
     except Exception as exc:  # noqa: BLE001 - deliberate: never let one bad
         # row raise out of the batch; always resolve the outbox row instead.
         # Same rationale as turn_projector._project_one_job.
@@ -430,7 +618,10 @@ def _main() -> int:
         if r.error:
             print(f"job_id={r.job_id} outcome={r.outcome} error={r.error!r}")
         else:
-            print(f"job_id={r.job_id} outcome={r.outcome} chunk_count={r.chunk_count}")
+            print(
+                f"job_id={r.job_id} outcome={r.outcome} chunk_count={r.chunk_count} "
+                f"source_ref_count={r.source_ref_count}"
+            )
     return 0
 
 

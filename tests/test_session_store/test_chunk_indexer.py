@@ -50,6 +50,7 @@ Reproduction (see also output/session-chunk-indexer-report.md):
 
 from __future__ import annotations
 
+import hashlib
 import os
 import uuid
 from datetime import datetime, timezone
@@ -62,6 +63,7 @@ from session_store.chunk_indexer import (
     CHUNK_SIZE_CHARS,
     EMBEDDING_MODEL,
     EXPECTED_EMBEDDING_DIM,
+    extract_source_refs,
     extract_text,
     run_indexing_batch,
     split_into_chunks,
@@ -103,8 +105,8 @@ def _clean_tables(pg_config: SessionStoreConfig):
         with conn.cursor() as cur:
             cur.execute(
                 "TRUNCATE TABLE session_idx.chunk_embeddings, session_idx.chunk_fts, "
-                "session_core.chunks, session_jobs.outbox, session_core.turns, "
-                "session_core.sessions, session_raw.envelopes CASCADE"
+                "session_core.source_refs, session_core.chunks, session_jobs.outbox, "
+                "session_core.turns, session_core.sessions, session_raw.envelopes CASCADE"
             )
         conn.commit()
     yield
@@ -429,3 +431,167 @@ def test_embedding_dimension_matches_declared_column_dimension(
 
     assert actual_dim == EXPECTED_EMBEDDING_DIM
     assert actual_dim == declared_dim
+
+
+# ---------------------------------------------------------------------------
+# 6. extract_source_refs() pure-function unit coverage (no DB needed) — see
+#    module docstring "Source-ref extraction" for the rule rationale.
+# ---------------------------------------------------------------------------
+def test_extract_source_refs_tool_call_rule():
+    refs = extract_source_refs("tool", {"tool_name": "Read"}, "irrelevant chunk text")
+    assert refs == [("tool_call", "Read")]
+
+
+def test_extract_source_refs_file_rule_top_level_and_nested():
+    refs = extract_source_refs(
+        "tool",
+        {"file_path": "/a.py", "tool_input": {"path": "/b.py", "notebook_path": "/c.ipynb"}},
+        "no urls",
+    )
+    assert refs == [("file", "/a.py"), ("file", "/b.py"), ("file", "/c.ipynb")]
+
+
+def test_extract_source_refs_url_rule_matches_chunk_text_not_payload():
+    refs = extract_source_refs(
+        "assistant",
+        {"raw_text": "payload has no url"},
+        "but the chunk text has https://example.com/x and https://example.org/y",
+    )
+    assert refs == [
+        ("url", "https://example.com/x"),
+        ("url", "https://example.org/y"),
+    ]
+
+
+def test_extract_source_refs_returns_empty_list_for_nothing_extractable():
+    refs = extract_source_refs("user", {"raw_text": "just plain text, nothing special"}, "x")
+    assert refs == []
+
+
+# ---------------------------------------------------------------------------
+# 7. Four-case end-to-end fixture via the REAL insert_envelope() chain
+#    (input.md "4. Négy-eseti teszt-fixture"): each case inserts a real
+#    envelope, runs the full chain (turn_projector -> chunk_indexer), and
+#    asserts the actual session_core.source_refs rows produced — proven via
+#    real SQL queries, not just "the function ran without raising".
+# ---------------------------------------------------------------------------
+def _source_refs_for_chunk(pg_config: SessionStoreConfig, chunk_id: int) -> list[tuple]:
+    with psycopg.connect(pg_config.conninfo()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ref_kind, ref_value, content_hash FROM session_core.source_refs "
+                "WHERE chunk_id = %s ORDER BY source_ref_id ASC",
+                (chunk_id,),
+            )
+            return cur.fetchall()
+
+
+def test_case_a_tool_call_payload_produces_tool_call_source_ref(
+    pg_config: SessionStoreConfig,
+):
+    """Case A: role resolves to 'tool' (provider_event_name='PostToolUse'),
+    content carries tool_name -> one ref_kind='tool_call' row."""
+    turn_id = _make_turn(
+        pg_config,
+        provider_event_name="PostToolUse",
+        payload={"raw_text": "ran a tool", "tool_name": "Read"},
+    )
+    results = run_indexing_batch(config=pg_config)
+    assert len(results) == 1
+    assert results[0].outcome == "done"
+    assert results[0].source_ref_count == 1
+
+    chunks = _chunks_for_turn(pg_config, turn_id)
+    assert len(chunks) == 1
+    chunk_id = chunks[0][0]
+
+    refs = _source_refs_for_chunk(pg_config, chunk_id)
+    assert len(refs) == 1
+    ref_kind, ref_value, content_hash = refs[0]
+    assert ref_kind == "tool_call"
+    assert ref_value == "Read"
+    assert content_hash == hashlib.sha256(ref_value.encode("utf-8")).hexdigest()
+
+
+def test_case_b_file_path_payload_produces_file_source_ref(
+    pg_config: SessionStoreConfig,
+):
+    """Case B: tool_input.file_path present -> one ref_kind='file' row."""
+    turn_id = _make_turn(
+        pg_config,
+        provider_event_name="PostToolUse",
+        payload={
+            "raw_text": "edited a file",
+            "tool_input": {"file_path": "/workspace/session_store/chunk_indexer.py"},
+        },
+    )
+    results = run_indexing_batch(config=pg_config)
+    assert len(results) == 1
+    assert results[0].outcome == "done"
+    assert results[0].source_ref_count == 1
+
+    chunks = _chunks_for_turn(pg_config, turn_id)
+    chunk_id = chunks[0][0]
+
+    refs = _source_refs_for_chunk(pg_config, chunk_id)
+    assert len(refs) == 1
+    ref_kind, ref_value, content_hash = refs[0]
+    assert ref_kind == "file"
+    assert ref_value == "/workspace/session_store/chunk_indexer.py"
+    assert content_hash == hashlib.sha256(ref_value.encode("utf-8")).hexdigest()
+
+
+def test_case_c_url_in_text_produces_url_source_ref(
+    pg_config: SessionStoreConfig,
+):
+    """Case C: turn text contains a URL -> one ref_kind='url' row, matched
+    against the chunk TEXT (not the raw payload structure)."""
+    turn_id = _make_turn(
+        pg_config,
+        payload={"raw_text": "see the docs at https://example.com/docs for details"},
+    )
+    results = run_indexing_batch(config=pg_config)
+    assert len(results) == 1
+    assert results[0].outcome == "done"
+    assert results[0].source_ref_count == 1
+
+    chunks = _chunks_for_turn(pg_config, turn_id)
+    chunk_id = chunks[0][0]
+
+    refs = _source_refs_for_chunk(pg_config, chunk_id)
+    assert len(refs) == 1
+    ref_kind, ref_value, content_hash = refs[0]
+    assert ref_kind == "url"
+    assert ref_value == "https://example.com/docs"
+    assert content_hash == hashlib.sha256(ref_value.encode("utf-8")).hexdigest()
+
+
+def test_case_d_nothing_extractable_produces_zero_source_refs_no_error(
+    pg_config: SessionStoreConfig,
+):
+    """Case D: control case — plain text, no tool_name/file key/URL ->
+    zero session_core.source_refs rows, no exception, outbox row still
+    marked 'done' (not failed)."""
+    turn_id = _make_turn(
+        pg_config,
+        payload={"raw_text": "just a plain assistant reply, nothing to extract here"},
+    )
+    results = run_indexing_batch(config=pg_config)
+    assert len(results) == 1
+    assert results[0].outcome == "done"
+    assert results[0].error is None
+    assert results[0].source_ref_count == 0
+
+    chunks = _chunks_for_turn(pg_config, turn_id)
+    chunk_id = chunks[0][0]
+
+    refs = _source_refs_for_chunk(pg_config, chunk_id)
+    assert refs == []
+
+    with psycopg.connect(pg_config.conninfo()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM session_core.source_refs WHERE chunk_id = %s",
+                (chunk_id,),
+            )
+            assert cur.fetchone()[0] == 0

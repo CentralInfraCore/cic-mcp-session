@@ -52,7 +52,7 @@ default_scope: session_id
 cross_session: false
 ```
 
-## Tervezett adatfolyam (Postgres-first, még nem implementált)
+## Adatfolyam (Postgres-first, implementálva)
 
 ```mermaid
 graph TD
@@ -65,13 +65,47 @@ graph TD
 
 Schema szeparáció: `session_raw` / `session_core` / `session_idx` / `session_jobs` (outbox/retry)
 / `session_api`. A trigger réteg nem hívhat LLM-et vagy HTTP-t — csak content hash ellenőrzést,
-mező-frissítést, outbox enqueue-t végezhet. A részletes DDL-tervezés a
-`session-postgres-storage-design-001` capability-job feladata.
+mező-frissítést, outbox enqueue-t végezhet. A részletes DDL-t a
+`session-postgres-storage-design-001` capability-job tervezte meg
+(`output/session-postgres-storage-design.md`), a DDL-t a `session-raw-event-store-001` job
+alkalmazta valódi Postgres ellen (`output/session-postgres-schema.sql`,
+`output/session-raw-event-store-report.md`).
 
 ## Jelenlegi állapot
 
-A repo a `base-repo` `mcp/main` MCP-szerver scaffold-jából lett bootstrapelve
-(2026-06-20) — a fenti adatfolyamból jelenleg semmi nincs implementálva, a `source/` mappa
-üres. A `make_source.py`/`mcp-server/` örökölt infrastruktúra generikus, session-specifikus
-tartalom (SessionIngressEnvelope schema, Postgres migráció) a következő capability-jobokból
-fog megérkezni: `session-ingress-envelope-contract-001`, `session-postgres-storage-design-001`.
+A fenti adatfolyam MINDEN lépése implementálva és valódi Postgres ellen bizonyítva van
+(~17 capability-job, lásd `output/session-*-report.md` minden egyes állításhoz):
+
+- **A → B (ingest → raw event store)**: `session_store/envelope_writer.py:165`
+  (`insert_envelope`) ír a `session_raw.envelopes`-be; a valódi producer
+  `hooks/log-event.py:303-304` (Claude Code hook stdin JSON-ből épít envelope-ot és hívja
+  `insert_envelope()`-et) — `output/session-raw-event-store-report.md`,
+  `output/session-hook-collector-report.md`
+- **B → C (turn/timeline projection, chunk store)**: `session_store/turn_projector.py:300`
+  (`run_projection_batch`) projektál `session_core.sessions`/`turns`-ba;
+  `session_store/chunk_indexer.py:378` (`run_indexing_batch`) darabol `session_core.chunks`-ra
+  — `output/session-turn-projector-report.md`, `output/session-chunk-indexer-report.md`
+- **C → D (FTS, vector, metadata index)**: a chunk-indexer worker tölti fel
+  `session_idx.chunk_fts`-t és `session_idx.chunk_embeddings`-t
+  (`paraphrase-multilingual-MiniLM-L12-v2`, tényleges dimenzió 384, lemérve) —
+  `output/session-chunk-indexer-report.md`
+- **D → E (session_api stabil SQL függvények)**: `search_context()` (FTS),
+  `search_context_vector()` (cosine/HNSW), `search_context_hybrid()` (RRF-fúzió),
+  `get_timeline()`, `get_context_pack()`, `session_status()`, `get_source_refs()` —
+  `output/session-retrieval-quality-report.md`, `output/session-vector-search-api-report.md`,
+  `output/session-hybrid-search-api-report.md`, `output/session-source-refs-api-report.md`
+- **E → F (MCP read tools)**: `mcp-server/session_server.py` — 7 tool
+  (`search_session_context` + `search_session_context_fts`/`search_session_context_vector`/
+  `get_session_timeline`/`get_session_context_pack`/`get_session_status`/
+  `get_session_source_refs`) — `output/session-mcp-tools-report.md`,
+  `output/session-mcp-tools-remaining-report.md`
+- **worker loop, ütemezve**: `session_store/worker_loop.py:65`/`:93`
+  (`run_one_iteration`/`run_loop`), a fenti B→C és C→D lépéseket egymás után futtatja —
+  `output/session-worker-scheduler-report.md`
+- **host-natív indítás**: `.mcp.json.tpl` `{{REPO_ROOT}}/.venv-host/bin/python`-ot használ —
+  `output/session-mcp-venv-fix-report.md`
+
+Dokumentált rés: a fenti komponensek production reachability-je `scaffold` szintű — nincs
+deployolt cron/systemd ütemezés a worker-loop-hoz (`output/session-worker-scheduler-report.md`
+"Risks"), és a `cic-session` MCP szerver nincs bekötve élesben semelyik orchestrátor/Claude
+Code session `.mcp.json`-jába (`output/session-mcp-config-wiring-report.md`).

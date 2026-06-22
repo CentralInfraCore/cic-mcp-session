@@ -45,10 +45,51 @@ az queue/DB/worker oldali feldolgozás, nem ingress-szintű feladat.
 
 ## Jelenlegi állapot
 
-`experimental`, nincs még session-specifikus implementáció — a `make_source.py`/`mcp-server/`
-scaffold a `base-repo` MCP-template öröksége, `source/` üres. Az első capability-jobok
-(`session-repo-baseline-audit-001` → bootstrap, `session-ingress-envelope-contract-001`,
-`session-postgres-storage-design-001`) a `cic-mcp-factory/jobs/` alól indulnak.
+`experimental` — DE a session-specifikus implementáció ~17 capability-jobon keresztül már
+megépült és valódi Postgres ellen bizonyítva van (lásd `output/session-*-report.md` minden
+egyes állításhoz):
+
+- **envelope ingest + raw event store**: `session_store/envelope_writer.py:165`
+  (`insert_envelope`), `:105` (`validate_envelope`) → `session_raw.envelopes`
+  (`output/session-postgres-schema.sql`) — `output/session-raw-event-store-report.md`
+- **valódi producer**: `hooks/log-event.py` — Claude Code hook stdin JSON-ből épít
+  `SessionIngressEnvelope`-ot és hívja `insert_envelope()`-et (`hooks/log-event.py:303-304`)
+  — `output/session-hook-collector-report.md`
+- **worker loop** (projection + chunk-indexelés, ütemezve): `session_store/turn_projector.py:300`
+  (`run_projection_batch`), `session_store/chunk_indexer.py:378` (`run_indexing_batch`),
+  összefűzve `session_store/worker_loop.py:65` (`run_one_iteration`)/`:93` (`run_loop`) —
+  `output/session-turn-projector-report.md`, `output/session-chunk-indexer-report.md`,
+  `output/session-worker-scheduler-report.md`
+- **chunk indexer**: `session_core.chunks`/`session_idx.chunk_fts`/`chunk_embeddings`
+  feltöltése, `paraphrase-multilingual-MiniLM-L12-v2` embedding modell, tényleges dimenzió
+  384 (lemérve, nem feltételezve) — `output/session-chunk-indexer-report.md`
+- **vector/hybrid/FTS search**: `session_api.search_context()` (FTS, `'simple'`-konfiguráció),
+  `search_context_vector()` (cosine, HNSW index), `search_context_hybrid()` (RRF-fúzió) —
+  `output/session-retrieval-quality-report.md`, `output/session-vector-search-api-report.md`,
+  `output/session-hybrid-search-api-report.md`
+- **session_api réteg**: `get_timeline()`, `get_context_pack()`, `session_status()`,
+  `get_source_refs()` (`output/session-postgres-schema.sql` +
+  `output/session-source-refs-api-migration.sql`) — `output/session-source-refs-api-report.md`
+- **7 tool-os MCP szerver**: `mcp-server/session_server.py` — `search_session_context` +
+  6 további tool (`search_session_context_fts`, `search_session_context_vector`,
+  `get_session_timeline`, `get_session_context_pack`, `get_session_status`,
+  `get_session_source_refs`) — `output/session-mcp-tools-report.md`,
+  `output/session-mcp-tools-remaining-report.md`
+- **host-natív `.venv-host` indítás**: `.mcp.json.tpl` mindkét bejegyzése
+  (`cic-graph`/`cic-session`) `{{REPO_ROOT}}/.venv-host/bin/python`-ot használ, NEM a Docker
+  builder lapos `p_venv`-jét — `output/session-mcp-venv-fix-report.md`
+
+A `make_source.py`/`mcp-server/server.py` (a `cic-graph` KB szerver) valóban a `base-repo`
+MCP-template öröksége és session-specifikus tartalmi szempontból generikus — ez a két modul
+NEM session-specifikus implementáció, hanem a KB-réteg külön komponense, lásd "MCP szerver
+tool-ok" lentebb a `mcp-server/server.py`-hoz, és a `mcp-server/session_server.py`-hoz a fenti
+listát.
+
+A fennmaradó, dokumentált rés: a fenti komponensek production reachability-je `scaffold`
+szintű — nincs deployolt cron/systemd ütemezés a worker-loop-hoz
+(`output/session-worker-scheduler-report.md` "Risks"), és a `cic-session` MCP szerver nincs
+bekötve élesben semelyik orchestrátor/Claude Code session `.mcp.json`-jába
+(`output/session-mcp-config-wiring-report.md`).
 
 ## MCP szerver
 

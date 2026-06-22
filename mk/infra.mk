@@ -6,7 +6,7 @@ MCP_PORT ?= 8000
 PROFILE ?= internal
 
 # ---- Phony ----
-.PHONY: infra.up infra.down infra.shell infra.build infra.fmt infra.lint infra.typecheck infra.check infra.repo.init infra.deps infra.coverage infra.clean infra.help infra.kb.gitmodules infra.kb.gitmodules.check infra.kb.build infra.mcp.run infra.mcp.run.sse infra.mcp.config
+.PHONY: infra.up infra.down infra.shell infra.build infra.fmt infra.lint infra.typecheck infra.check infra.repo.init infra.deps infra.coverage infra.clean infra.help infra.kb.gitmodules infra.kb.gitmodules.check infra.kb.build infra.mcp.run infra.mcp.run.sse infra.mcp.run.session infra.mcp.config
 
 # =============================================================================
 # Container Lifecycle Management
@@ -114,6 +114,10 @@ infra.mcp.run:
 infra.mcp.run.sse:
 	@echo "--- Starting MCP server (SSE / HTTP) on $(MCP_HOST):$(MCP_PORT) ---"
 	@$(PYTHON) mcp-server/server.py --sse --host $(MCP_HOST) --port $(MCP_PORT)
+
+infra.mcp.run.session:
+	@echo "--- Starting Session MCP server (stdio) ---"
+	@$(PYTHON) mcp-server/session_server.py
 
 # =============================================================================
 # Infrastructure Help (Implementation Details)

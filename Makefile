@@ -4,7 +4,7 @@
 include mk/infra.mk
 
 # ---- Phony ----
-.PHONY: all help validate release-check release-prepare release-close test up down shell build fmt lint check typecheck repo.init manifest-verify manifest-update deps kb.gitmodules kb.gitmodules.check kb.build mcp.run mcp.run.sse mcp.config
+.PHONY: all help validate release-check release-prepare release-close test up down shell build fmt lint check typecheck repo.init manifest-verify manifest-update deps kb.gitmodules kb.gitmodules.check kb.build mcp.run mcp.run.sse mcp.run.session mcp.config
 
 # Default to showing help
 all: help
@@ -138,6 +138,7 @@ kb.gitmodules.check: infra.kb.gitmodules.check
 kb.build: infra.kb.build
 mcp.run: infra.mcp.run
 mcp.run.sse: infra.mcp.run.sse
+mcp.run.session: infra.mcp.run.session
 mcp.config: infra.mcp.config
 
 # =============================================================================

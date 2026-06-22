@@ -1,12 +1,12 @@
 # Makefile for Core Infrastructure Tasks
 
-PYTHON := ./p_venv/bin/python
+PYTHON := ./.venv-host/bin/python
 MCP_HOST ?= 127.0.0.1
 MCP_PORT ?= 8000
 PROFILE ?= internal
 
 # ---- Phony ----
-.PHONY: infra.up infra.down infra.shell infra.build infra.fmt infra.lint infra.typecheck infra.check infra.repo.init infra.deps infra.coverage infra.clean infra.help infra.kb.gitmodules infra.kb.gitmodules.check infra.kb.build infra.mcp.run infra.mcp.run.sse infra.mcp.run.session infra.mcp.config
+.PHONY: infra.up infra.down infra.shell infra.build infra.fmt infra.lint infra.typecheck infra.check infra.repo.init infra.deps infra.deps.local infra.coverage infra.clean infra.help infra.kb.gitmodules infra.kb.gitmodules.check infra.kb.build infra.mcp.run infra.mcp.run.sse infra.mcp.run.session infra.mcp.config
 
 # =============================================================================
 # Container Lifecycle Management
@@ -69,6 +69,13 @@ infra.repo.init:
 infra.deps:
 	@echo "--- Initializing Python dependencies into ./p_venv cache ---"
 	@docker compose run --rm setup
+
+infra.deps.local:
+	@echo "--- Building host-native ./.venv-host (for host-launched MCP servers, e.g. Claude Code) ---"
+	@echo "--- p_venv (above) is a flat 'pip install --target' dir for the Docker builder's PYTHONPATH workflow, NOT a venv with bin/python — this is a SEPARATE, additive mechanism, does not replace or alter p_venv/setup/builder ---"
+	@python3 -m venv .venv-host
+	@./.venv-host/bin/pip install --no-cache-dir -r requirements.txt
+	@echo ".venv-host ready at $(shell pwd)/.venv-host"
 
 infra.coverage:
 	@echo "--- Generating HTML coverage report ---"

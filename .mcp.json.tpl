@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "cic-graph": {
-      "command": "{{REPO_ROOT}}/p_venv/bin/python",
+      "command": "{{REPO_ROOT}}/.venv-host/bin/python",
       "args": [
         "{{REPO_ROOT}}/mcp-server/server.py"
       ],
@@ -10,10 +10,13 @@
       }
     },
     "cic-session": {
-      "command": "{{REPO_ROOT}}/p_venv/bin/python",
+      "command": "{{REPO_ROOT}}/.venv-host/bin/python",
       "args": [
         "{{REPO_ROOT}}/mcp-server/session_server.py"
-      ]
+      ],
+      "env": {
+        "PYTHONPATH": "{{REPO_ROOT}}"
+      }
     }
   }
 }

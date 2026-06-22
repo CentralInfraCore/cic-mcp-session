@@ -67,7 +67,10 @@ make mcp.run     ← mcp-server/server.py (FastMCP, stdio)
 ## Kulcs parancsok
 
 ```bash
-make deps           # ./p_venv létrehozása Dockerrel (első lépés, repo clone után — p_venv gitignored!)
+make deps           # ./p_venv létrehozása Dockerrel — flat 'pip install --target', a Docker builder
+                     # service PYTHONPATH-alapú workflow-jához, NEM egy host-natívan futtatható venv
+make deps.local      # ./.venv-host létrehozása host-natívan (python3 -m venv) — EZT használja
+                     # a .mcp.json.tpl (Claude Code host-natív MCP szerver indítás)
 make mcp.config     # .mcp.json generálás
 make kb.build       # Knowledge base generálás a source/ tartalmából
 make mcp.run        # MCP szerver indítás (stdio, Claude Code-hoz)
@@ -91,7 +94,8 @@ sqlite_data/          ← generált SQLite (gitignore-d)
 schemas.json          ← adat struktúra sémák
 sqlite_data/db_schema.json ← SQLite tábla definíciók
 .mcp.json             ← MCP szerver konfiguráció Claude Code-hoz
-p_venv/               ← Python venv (gitignore-d)
+p_venv/               ← flat package-dir Docker builder PYTHONPATH-hoz (gitignore-d, NEM venv)
+.venv-host/           ← host-natív venv, .mcp.json.tpl ezt indítja (gitignore-d)
 
 tools/                ← release tooling (compiler.py, infra.py, vault signing)
 docs/                 ← architektúra és koncept dokumentáció (EN + HU)
@@ -101,10 +105,14 @@ mk/infra.mk           ← Makefile implementáció
 
 ## Python környezet
 
-Az MCP szerver és a KB generátor a lokális `p_venv/`-et használja (nem Docker):
+Az MCP szerver és a KB generátor a host-natív `.venv-host/`-ot használja (nem Docker,
+nem a `p_venv/`-et — az utóbbi egy lapos `pip install --target` könyvtár a Docker
+`builder` service `PYTHONPATH=/app:/app/p_venv`-alapú workflow-jához, NEM egy
+host-natívan futtatható venv `bin/python`-nal):
 ```bash
-p_venv/bin/python make_source.py
-p_venv/bin/python mcp-server/server.py
+make deps.local                  # ./.venv-host build (első lépés, repo clone után)
+.venv-host/bin/python make_source.py
+.venv-host/bin/python mcp-server/server.py
 ```
 
 A release tooling (validate, test, fmt) Docker containerben fut.

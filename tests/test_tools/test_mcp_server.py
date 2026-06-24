@@ -1,9 +1,12 @@
 import os
 import sys
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+import yaml
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../mcp-server")))
@@ -200,3 +203,215 @@ class TestSearchTokenFallback:
         with patch.object(mcp_server, "load_kb", return_value=kb):
             results = mcp_server.search_token("xyznotaword", top_k=3)
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# update_companion / record_decision — SOURCE_DIR write confinement
+#
+# Regression coverage for the path-traversal / write-confinement vulnerability:
+# both tools previously accepted a client-supplied absolute file_path/
+# companion_path with NO SOURCE_DIR-containment check before opening the
+# file for write. _resolve_within_source_dir() (server.py, near SOURCE_DIR
+# definition) must now reject any path whose *resolved* location escapes
+# SOURCE_DIR, while leaving legitimate in-SOURCE_DIR writes unaffected.
+# ---------------------------------------------------------------------------
+
+class TestWriteConfinement:
+    @pytest.fixture(autouse=True)
+    def _isolated_source_dir(self, tmp_path):
+        """Point SOURCE_DIR at an isolated tmp dir and provide an outside-dir target."""
+        import server as mcp_server
+
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+
+        self.mcp_server = mcp_server
+        self.source_dir = source_dir
+        self.outside_target = outside_dir / "victim.yaml"
+
+        with patch.object(mcp_server, "SOURCE_DIR", source_dir):
+            yield
+
+    def _seed_yaml(self, path: Path, content: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            yaml.dump(content, f)
+
+    # -- update_companion: rejection -----------------------------------
+
+    def test_update_companion_rejects_path_outside_source_dir(self):
+        self._seed_yaml(self.outside_target, {"description": "", "tags": []})
+        before = self.outside_target.read_text()
+
+        result = self.mcp_server.update_companion(
+            file_path=str(self.outside_target),
+            description="PWNED",
+            tags=["poc"],
+        )
+
+        assert result["success"] is False
+        assert "escapes SOURCE_DIR" in result["message"]
+        # target file must be completely untouched
+        assert self.outside_target.read_text() == before
+
+    def test_update_companion_rejects_traversal_relative_path(self):
+        # relative path that, once joined to SOURCE_DIR and resolved,
+        # escapes SOURCE_DIR via '..' segments
+        self._seed_yaml(self.outside_target, {"description": "", "tags": []})
+        before = self.outside_target.read_text()
+
+        traversal = f"../outside/{self.outside_target.name}"
+        result = self.mcp_server.update_companion(
+            file_path=traversal,
+            description="PWNED",
+        )
+
+        assert result["success"] is False
+        assert "escapes SOURCE_DIR" in result["message"]
+        assert self.outside_target.read_text() == before
+
+    # -- update_companion: no regression -------------------------------
+
+    def test_update_companion_legit_write_inside_source_dir_still_works(self):
+        legit = self.source_dir / "pkg" / "companion.yaml"
+        self._seed_yaml(legit, {"description": "", "category": [], "tags": []})
+
+        result = self.mcp_server.update_companion(
+            file_path="pkg/companion.yaml",
+            description="legit update",
+            tags=["x"],
+        )
+
+        assert result["success"] is True
+        assert result["updated_fields"] == ["description", "tags"]
+
+        with legit.open() as f:
+            data = yaml.safe_load(f)
+        assert data["description"] == "legit update"
+        assert data["tags"] == ["x"]
+
+    def test_update_companion_legit_write_with_absolute_path_inside_source_dir(self):
+        legit = self.source_dir / "pkg2" / "companion.yaml"
+        self._seed_yaml(legit, {"description": "", "tags": []})
+
+        result = self.mcp_server.update_companion(
+            file_path=str(legit),
+            description="legit absolute update",
+        )
+
+        assert result["success"] is True
+        with legit.open() as f:
+            data = yaml.safe_load(f)
+        assert data["description"] == "legit absolute update"
+
+    # -- record_decision: rejection -------------------------------------
+
+    def test_record_decision_rejects_path_outside_source_dir(self):
+        self._seed_yaml(self.outside_target, {"agent_decisions": []})
+        before = self.outside_target.read_text()
+
+        fake_kb = {"nodes": {}}
+        with patch.object(self.mcp_server, "load_kb", return_value=fake_kb):
+            result = self.mcp_server.record_decision(
+                node_id="n1",
+                decision="PWNED",
+                companion_path=str(self.outside_target),
+            )
+
+        assert result["success"] is False
+        assert "escapes SOURCE_DIR" in result["message"]
+        assert self.outside_target.read_text() == before
+
+    def test_record_decision_rejects_traversal_relative_path(self):
+        self._seed_yaml(self.outside_target, {"agent_decisions": []})
+        before = self.outside_target.read_text()
+
+        traversal = f"../outside/{self.outside_target.name}"
+        fake_kb = {"nodes": {}}
+        with patch.object(self.mcp_server, "load_kb", return_value=fake_kb):
+            result = self.mcp_server.record_decision(
+                node_id="n1",
+                decision="PWNED",
+                companion_path=traversal,
+            )
+
+        assert result["success"] is False
+        assert "escapes SOURCE_DIR" in result["message"]
+        assert self.outside_target.read_text() == before
+
+    # -- record_decision: no regression ----------------------------------
+
+    def test_record_decision_legit_write_inside_source_dir_still_works(self):
+        legit = self.source_dir / "pkg" / "companion.yaml"
+        self._seed_yaml(legit, {"agent_decisions": []})
+
+        fake_kb = {"nodes": {}}
+        with patch.object(self.mcp_server, "load_kb", return_value=fake_kb):
+            result = self.mcp_server.record_decision(
+                node_id="n1",
+                decision="legit decision",
+                rationale="because tests demand it",
+                companion_path="pkg/companion.yaml",
+            )
+
+        assert result["success"] is True
+        with legit.open() as f:
+            data = yaml.safe_load(f)
+        assert len(data["agent_decisions"]) == 1
+        assert data["agent_decisions"][0]["decision"] == "legit decision"
+        assert data["agent_decisions"][0]["rationale"] == "because tests demand it"
+
+    def test_record_decision_legit_write_with_absolute_path_inside_source_dir(self):
+        legit = self.source_dir / "pkg3" / "companion.yaml"
+        self._seed_yaml(legit, {"agent_decisions": []})
+
+        fake_kb = {"nodes": {}}
+        with patch.object(self.mcp_server, "load_kb", return_value=fake_kb):
+            result = self.mcp_server.record_decision(
+                node_id="n1",
+                decision="legit absolute decision",
+                companion_path=str(legit),
+            )
+
+        assert result["success"] is True
+        with legit.open() as f:
+            data = yaml.safe_load(f)
+        assert len(data["agent_decisions"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# _resolve_within_source_dir — unit-level helper checks
+# ---------------------------------------------------------------------------
+
+class TestResolveWithinSourceDir:
+    def test_rejects_symlink_escape(self, tmp_path):
+        """A symlink inside SOURCE_DIR pointing outside it must still be rejected
+        (this is exactly the class of bypass a str-prefix check would miss)."""
+        import server as mcp_server
+
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        outside_file = outside_dir / "victim.yaml"
+        outside_file.write_text("agent_decisions: []\n")
+
+        symlink_path = source_dir / "link.yaml"
+        symlink_path.symlink_to(outside_file)
+
+        with patch.object(mcp_server, "SOURCE_DIR", source_dir):
+            with pytest.raises(ValueError, match="escapes SOURCE_DIR"):
+                mcp_server._resolve_within_source_dir(str(symlink_path))
+
+    def test_accepts_path_inside_source_dir(self, tmp_path):
+        import server as mcp_server
+
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        (source_dir / "pkg").mkdir()
+
+        with patch.object(mcp_server, "SOURCE_DIR", source_dir):
+            resolved = mcp_server._resolve_within_source_dir("pkg/companion.yaml")
+        assert resolved == (source_dir / "pkg" / "companion.yaml").resolve()

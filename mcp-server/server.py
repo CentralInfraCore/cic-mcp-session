@@ -1167,6 +1167,34 @@ def guided_path(topic: str, max_steps: int = 10) -> dict:
 SOURCE_DIR = Path(os.environ.get("SOURCE_DIR", str(BASE_DIR / "source")))
 
 
+def _resolve_within_source_dir(file_path: str) -> Path:
+    """Build and validate a path against SOURCE_DIR confinement.
+
+    Builds the path the same way callers historically did (absolute paths
+    are kept as-is, relative paths are joined under SOURCE_DIR), then
+    resolves both the candidate and SOURCE_DIR (following symlinks,
+    collapsing '..' segments) and verifies the resolved candidate is
+    actually contained within the resolved SOURCE_DIR.
+
+    Raises:
+        ValueError: if the resolved path escapes SOURCE_DIR.
+    """
+    p = Path(file_path)
+    if not p.is_absolute():
+        p = SOURCE_DIR / file_path
+
+    resolved = p.resolve()
+    resolved_source_dir = SOURCE_DIR.resolve()
+
+    if not resolved.is_relative_to(resolved_source_dir):
+        raise ValueError(
+            f"path escapes SOURCE_DIR, refused: {file_path!r} resolved to "
+            f"{resolved} which is not within {resolved_source_dir}"
+        )
+
+    return resolved
+
+
 _COMPANION_LANGS = {
     "go": {"glob": "*.go", "is_test": lambda name: "_test.go" in name},
     "py": {"glob": "*.py", "is_test": lambda name: name.startswith("test_") or name.endswith("_test.py")},
@@ -1509,9 +1537,11 @@ def update_companion(
     """
     import yaml as _yaml
 
-    p = Path(file_path)
-    if not p.is_absolute():
-        p = SOURCE_DIR / file_path
+    try:
+        p = _resolve_within_source_dir(file_path)
+    except ValueError:
+        return {"success": False, "message": "path escapes SOURCE_DIR, refused"}
+
     if not p.exists():
         return {"success": False, "path": str(p), "message": "file not found"}
 
@@ -1584,22 +1614,26 @@ def record_decision(
     # Resolve companion path from node if not given
     p: Optional[Path] = None
     if companion_path:
-        p = Path(companion_path)
-        if not p.is_absolute():
-            p = SOURCE_DIR / companion_path
+        try:
+            p = _resolve_within_source_dir(companion_path)
+        except ValueError:
+            return {"success": False, "message": "path escapes SOURCE_DIR, refused"}
     else:
         node = kb["nodes"].get(str(node_id))
         if node:
             src = node.get("source_file") or node.get("file_path") or ""
             if src:
                 candidate = Path(src).with_suffix(".yaml")
-                if candidate.exists():
-                    p = candidate
-                else:
-                    candidate2 = SOURCE_DIR / src
-                    candidate2 = candidate2.with_suffix(".yaml")
-                    if candidate2.exists():
-                        p = candidate2
+                try:
+                    if candidate.exists():
+                        p = _resolve_within_source_dir(str(candidate))
+                    else:
+                        candidate2 = SOURCE_DIR / src
+                        candidate2 = candidate2.with_suffix(".yaml")
+                        if candidate2.exists():
+                            p = _resolve_within_source_dir(str(candidate2))
+                except ValueError:
+                    return {"success": False, "message": "path escapes SOURCE_DIR, refused"}
 
     if p is None or not p.exists():
         return {

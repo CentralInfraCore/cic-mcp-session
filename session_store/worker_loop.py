@@ -37,6 +37,7 @@ from dataclasses import dataclass
 
 from session_store.chunk_indexer import run_indexing_batch
 from session_store.envelope_writer import SessionStoreConfig
+from session_store.runtime_env import load_session_env
 from session_store.turn_projector import run_projection_batch
 
 logger = logging.getLogger(__name__)
@@ -186,8 +187,11 @@ def _main() -> int:
 
     Runs the bounded (or, if --max-iterations is omitted, unbounded) polling
     loop against the Postgres instance configured via SESSION_STORE_PG_*/
-    PG* env vars (see SessionStoreConfig.from_env), printing a one-line
-    summary per iteration. This is the documented, runnable CLI entry point
+    PG* env vars (see SessionStoreConfig.from_env) — first loading the
+    shared session.env file, if any (see session_store.runtime_env.
+    load_session_env(), job session-runtime-env-unification-001), printing
+    a one-line summary per iteration. This is the documented, runnable CLI
+    entry point
     referenced in the report's reachability section; it does NOT by itself
     prove anything about whether something invokes it on a recurring
     schedule in production — see report "Findings"/"Reachability" and the
@@ -195,6 +199,14 @@ def _main() -> int:
     """
     logging.basicConfig(level=logging.INFO)
     args = _build_arg_parser().parse_args()
+
+    # Load the shared session.env file (if any) BEFORE SessionStoreConfig.
+    # from_env() resolves below, so this CLI entry point and
+    # mcp-server/session_server.py see the SAME DB config when pointed at
+    # the same env file — see session_store/runtime_env.py module
+    # docstring. No-op if no env file is found (pre-existing os.environ /
+    # SessionStoreConfig.from_env() defaults still apply unchanged).
+    load_session_env()
 
     results = run_loop(
         max_iterations=args.max_iterations,

@@ -10,6 +10,9 @@ jsonref
 # Session store write-path (session-raw-event-store-001)
 psycopg[binary]
 
+# Shared runtime env-file loader (session-runtime-env-unification-001)
+python-dotenv
+
 # MCP Server & Knowledge Base
 mcp
 markdown

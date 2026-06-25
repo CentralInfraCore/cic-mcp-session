@@ -4,7 +4,10 @@ session_core.chunks / session_idx.chunk_fts / session_idx.chunk_embeddings /
 session_core.source_refs.
 
 Job: session-chunk-indexer-001 (chunks/fts/embeddings), extended by
-session-source-refs-extractor-001 (source_refs).
+session-source-refs-extractor-001 (source_refs) and
+session-outbox-batch-and-observability-001 (batch_size LIMIT,
+statement_timeout, locked_by/locked_at, metrics — see
+session_store/outbox_observability.py).
 
 Source of truth for the table DDL:
   output/session-postgres-schema.sql (session_core.chunks, session_idx.chunk_fts,
@@ -24,19 +27,21 @@ session_store runtime path):
   make_source.py:17 EMBEDDING_MODEL / make_source.py:290 create_embeddings()
   (SentenceTransformer.encode(..., normalize_embeddings=True))
 
-Scope: this module ONLY reads pending/failed session_jobs.outbox rows with
-job_type='index_turn', reads the referenced session_core.turns row, derives
+Scope: this module reads pending/failed session_jobs.outbox rows with
+job_type='index_turn' (now LIMIT-ed to a configurable batch_size, see
+run_indexing_batch), reads the referenced session_core.turns row, derives
 1+ deterministic text chunks from turns.content, writes session_core.chunks,
 session_idx.chunk_fts (to_tsvector), session_idx.chunk_embeddings (local
 sentence-transformers model), and session_core.source_refs (deterministic
 key-/regex-based provenance extraction — see "Source-ref extraction" below),
 and closes the outbox row (done/failed/dead_letter). It does NOT populate
 session_idx.ranking_features, does NOT evaluate retrieval quality via
-session_api.search_context(), does NOT implement multi-worker
-locking/claiming beyond the single-worker-instance assumption
-turn_projector.py already documents, and does NOT call any external
-LLM/HTTP embedding API — see input.md "Nem cél" / module docstring of
-turn_projector.py for the inherited limitation, and report "Risks".
+session_api.search_context(), does NOT implement multi-worker CONCURRENCY/
+coordination beyond the single-worker-instance assumption turn_projector.py
+already documents (locked_by/locked_at are now written for observability/
+crash-forensics, NOT as a coordination primitive), and does NOT call any
+external LLM/HTTP embedding API — see input.md "Nem cél" / module docstring
+of turn_projector.py for the inherited limitation, and report "Risks".
 
 This module has NO production caller in this job (no cron/supervisor/systemd
 timer is wired in — see input.md "Nem cél"). Only this job's own pytest
@@ -126,6 +131,12 @@ from functools import lru_cache
 import psycopg
 
 from session_store.envelope_writer import SessionStoreConfig
+from session_store.outbox_observability import (
+    DEFAULT_BATCH_SIZE,
+    claim_outbox_rows,
+    set_claim_statement_timeout,
+    worker_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -358,25 +369,20 @@ class IndexingResult:
     error: str | None = None
 
 
-def _fetch_pending_jobs(cur: psycopg.Cursor) -> list[tuple]:
-    """Select pending/failed index_turn outbox rows for processing.
+def _fetch_pending_jobs(
+    cur: psycopg.Cursor, batch_size: int, locked_by: str
+) -> list[tuple]:
+    """Claim up to batch_size pending/failed index_turn outbox rows.
 
-    Mirrors turn_projector._fetch_pending_jobs exactly (same FOR UPDATE
-    SKIP LOCKED rationale under the single-worker-instance assumption — see
-    that function's docstring, which applies unchanged here).
+    Job: session-outbox-batch-and-observability-001 (extends the original
+    session-chunk-indexer-001 implementation). Mirrors
+    turn_projector._fetch_pending_jobs exactly — same batch_size LIMIT,
+    same locked_by/locked_at claim write via
+    session_store.outbox_observability.claim_outbox_rows(), same
+    statement_timeout safety net (set_claim_statement_timeout(), applied by
+    the caller before this runs).
     """
-    cur.execute(
-        """
-        SELECT job_id, source_id, attempts, max_attempts
-        FROM session_jobs.outbox
-        WHERE job_type = %s
-          AND status IN ('pending', 'failed')
-        ORDER BY created_at ASC
-        FOR UPDATE SKIP LOCKED
-        """,
-        (OUTBOX_JOB_TYPE,),
-    )
-    return cur.fetchall()
+    return claim_outbox_rows(cur, OUTBOX_JOB_TYPE, batch_size, locked_by)
 
 
 def _fetch_turn(cur: psycopg.Cursor, turn_id: int) -> tuple | None:
@@ -468,10 +474,13 @@ def _insert_source_ref(cur: psycopg.Cursor, chunk_id: int, ref_kind: str, ref_va
 
 
 def _mark_done(cur: psycopg.Cursor, job_id: int) -> None:
+    """Mark the row done AND clear locked_by/locked_at — identical to
+    turn_projector._mark_done (input.md "4.")."""
     cur.execute(
         """
         UPDATE session_jobs.outbox
-        SET status = 'done', updated_at = now()
+        SET status = 'done', updated_at = now(),
+            locked_by = NULL, locked_at = NULL
         WHERE job_id = %s
         """,
         (job_id,),
@@ -481,13 +490,17 @@ def _mark_done(cur: psycopg.Cursor, job_id: int) -> None:
 def _mark_failed_or_dead_letter(
     cur: psycopg.Cursor, job_id: int, attempts: int, max_attempts: int, error: str
 ) -> str:
-    """Identical bookkeeping to turn_projector._mark_failed_or_dead_letter."""
+    """Identical bookkeeping to turn_projector._mark_failed_or_dead_letter,
+    including the unmodified attempts/dead_letter decision logic — only the
+    locked_by/locked_at clearing (input.md "4.") was added to the same
+    UPDATE statement."""
     new_attempts = attempts + 1
     new_status = "dead_letter" if new_attempts >= max_attempts else "failed"
     cur.execute(
         """
         UPDATE session_jobs.outbox
-        SET status = %s, attempts = %s, last_error = %s, updated_at = now()
+        SET status = %s, attempts = %s, last_error = %s, updated_at = now(),
+            locked_by = NULL, locked_at = NULL
         WHERE job_id = %s
         """,
         (new_status, new_attempts, error, job_id),
@@ -563,15 +576,20 @@ def _index_one_job(
         return IndexingResult(job_id=job_id, outcome=outcome, error=str(exc))
 
 
-def run_indexing_batch(config: SessionStoreConfig | None = None) -> list[IndexingResult]:
+def run_indexing_batch(
+    config: SessionStoreConfig | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> list[IndexingResult]:
     """Run one batch of outbox->chunk/fts/embedding indexing.
 
-    Reads all current pending/failed index_turn outbox rows, indexes each
-    into session_core.chunks/session_idx.chunk_fts/session_idx.chunk_embeddings,
-    and resolves each outbox row to done/failed/dead_letter. Returns the
-    list of per-row results. Never raises on a per-row indexing failure —
-    only a connection-level failure (e.g. Postgres unreachable) propagates,
-    mirroring turn_projector.run_projection_batch exactly.
+    Claims up to batch_size pending/failed index_turn outbox rows (input.md
+    "2." — previously claimed ALL such rows in one transaction, unbounded),
+    indexes each into session_core.chunks/session_idx.chunk_fts/
+    session_idx.chunk_embeddings, and resolves each outbox row to done/
+    failed/dead_letter. Returns the list of per-row results. Never raises
+    on a per-row indexing failure — only a connection-level failure (e.g.
+    Postgres unreachable) propagates, mirroring
+    turn_projector.run_projection_batch exactly.
 
     This function calls NO external LLM/HTTP service for chunk-boundary
     decisions (split_into_chunks is pure/deterministic) — only the local
@@ -580,15 +598,17 @@ def run_indexing_batch(config: SessionStoreConfig | None = None) -> list[Indexin
     """
     cfg = config or SessionStoreConfig.from_env()
     results: list[IndexingResult] = []
+    locked_by = worker_identity()
 
     with psycopg.connect(cfg.conninfo()) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                jobs = _fetch_pending_jobs(cur)
-        # jobs is materialized above; rows were SKIP LOCKED-selected and the
-        # transaction that held that lock has already committed/closed, so
-        # each job is now processed in its own short transaction via
-        # _index_one_job — identical rationale to
+                set_claim_statement_timeout(cur)
+                jobs = _fetch_pending_jobs(cur, batch_size, locked_by)
+        # jobs is materialized above; rows were SKIP LOCKED-selected (LIMIT
+        # batch_size) and the transaction that held that lock has already
+        # committed/closed, so each job is now processed in its own short
+        # transaction via _index_one_job — identical rationale to
         # turn_projector.run_projection_batch.
         for job_id, source_id, attempts, max_attempts in jobs:
             results.append(_index_one_job(conn, job_id, source_id, attempts, max_attempts))

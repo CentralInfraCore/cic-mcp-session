@@ -2,7 +2,9 @@
 Outbox-worker for session_jobs.outbox (job_type='project_envelope') ->
 session_core.sessions / session_core.turns projection.
 
-Job: session-turn-projector-001
+Job: session-turn-projector-001 (batch-limit/statement_timeout/locked_by/
+locked_at/metrics added by session-outbox-batch-and-observability-001 — see
+session_store/outbox_observability.py for the shared implementation).
 
 Source of truth for the table DDL:
   output/session-postgres-schema.sql (session_jobs.outbox, session_core.sessions,
@@ -12,15 +14,20 @@ Source of truth for the write-path this worker consumes (read-only here):
   whose AFTER INSERT trigger trg_session_raw_envelopes_enqueue enqueues the
   session_jobs.outbox row this worker reads)
 
-Scope: this module ONLY reads pending/failed session_jobs.outbox rows with
-job_type='project_envelope', projects the referenced session_raw.envelopes
+Scope: this module reads pending/failed session_jobs.outbox rows with
+job_type='project_envelope' (now LIMIT-ed to a configurable batch_size, see
+run_projection_batch), projects the referenced session_raw.envelopes
 row into session_core.sessions/session_core.turns, and closes the outbox
 row (done/failed/dead_letter). It does NOT touch session_core.chunks,
 source_refs, manifests, or session_idx.* (embedding generation) — see
 input.md "Nem cél" / CLAUDE.md "Fő határok". It does NOT implement
-multi-worker locking/claiming beyond what is needed for a SINGLE worker
-instance — see "Decisions Proposed" / "Risks" in
-output/session-turn-projector-report.md for the explicit limitation.
+multi-worker CONCURRENCY/coordination beyond what is needed for a SINGLE
+worker instance (the locked_by/locked_at columns are now written for
+observability/crash-forensics, NOT as a coordination primitive a second
+worker instance would need to interpret) — see "Decisions Proposed" /
+"Risks" in output/session-turn-projector-report.md and
+output/session-outbox-batch-and-observability.md for the explicit
+limitation.
 
 This module has NO production caller in this job (no cron/supervisor/systemd
 timer is wired in — see input.md "Nem cél"). Only this job's own pytest
@@ -37,6 +44,12 @@ from dataclasses import dataclass
 import psycopg
 
 from session_store.envelope_writer import SessionStoreConfig
+from session_store.outbox_observability import (
+    DEFAULT_BATCH_SIZE,
+    claim_outbox_rows,
+    set_claim_statement_timeout,
+    worker_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,28 +116,25 @@ class ProjectionResult:
     error: str | None = None
 
 
-def _fetch_pending_jobs(cur: psycopg.Cursor) -> list[tuple]:
-    """Select pending/failed project_envelope outbox rows for processing.
+def _fetch_pending_jobs(
+    cur: psycopg.Cursor, batch_size: int, locked_by: str
+) -> list[tuple]:
+    """Claim up to batch_size pending/failed project_envelope outbox rows.
+
+    Job: session-outbox-batch-and-observability-001 (extends the original
+    session-turn-projector-001 implementation).
 
     FOR UPDATE SKIP LOCKED is used even under the single-worker-instance
     assumption documented in input.md/report "Risks" — it costs nothing
     with one worker and avoids a foot-gun if a second instance is ever
-    started by mistake, though it does NOT constitute the claim/locking
-    mechanism input.md explicitly scopes out (no locked_by/locked_at
-    bookkeeping is written here).
+    started by mistake. As of this job, the SELECT is now LIMIT-ed to
+    batch_size (input.md "2.") and the claimed rows' locked_by/locked_at
+    columns are written in the SAME transaction (input.md "4.") via
+    session_store.outbox_observability.claim_outbox_rows() — see that
+    module for the SQL and the statement_timeout safety net
+    (set_claim_statement_timeout(), applied by the caller before this runs).
     """
-    cur.execute(
-        """
-        SELECT job_id, source_id, attempts, max_attempts
-        FROM session_jobs.outbox
-        WHERE job_type = %s
-          AND status IN ('pending', 'failed')
-        ORDER BY created_at ASC
-        FOR UPDATE SKIP LOCKED
-        """,
-        (OUTBOX_JOB_TYPE,),
-    )
-    return cur.fetchall()
+    return claim_outbox_rows(cur, OUTBOX_JOB_TYPE, batch_size, locked_by)
 
 
 def _fetch_envelope(cur: psycopg.Cursor, source_id: int) -> tuple | None:
@@ -222,10 +232,18 @@ def _insert_turn(
 
 
 def _mark_done(cur: psycopg.Cursor, job_id: int) -> None:
+    """Mark the row done AND clear locked_by/locked_at (input.md "4.":
+    'törölje/null-ozza a feldolgozás befejezésekor').
+
+    Same UPDATE statement, not a separate clear_lock() round trip — adding
+    two SET clauses to the pre-existing statement, not changing what the
+    statement decides.
+    """
     cur.execute(
         """
         UPDATE session_jobs.outbox
-        SET status = 'done', updated_at = now()
+        SET status = 'done', updated_at = now(),
+            locked_by = NULL, locked_at = NULL
         WHERE job_id = %s
         """,
         (job_id,),
@@ -235,12 +253,18 @@ def _mark_done(cur: psycopg.Cursor, job_id: int) -> None:
 def _mark_failed_or_dead_letter(
     cur: psycopg.Cursor, job_id: int, attempts: int, max_attempts: int, error: str
 ) -> str:
+    """Unmodified retry/dead-letter DECISION logic (input.md "Nem cél" —
+    attempts/max_attempts/dead_letter is NOT touched by this job). The only
+    addition is clearing locked_by/locked_at in the SAME UPDATE (input.md
+    "4."), which does not change new_attempts/new_status computation below.
+    """
     new_attempts = attempts + 1
     new_status = "dead_letter" if new_attempts >= max_attempts else "failed"
     cur.execute(
         """
         UPDATE session_jobs.outbox
-        SET status = %s, attempts = %s, last_error = %s, updated_at = now()
+        SET status = %s, attempts = %s, last_error = %s, updated_at = now(),
+            locked_by = NULL, locked_at = NULL
         WHERE job_id = %s
         """,
         (new_status, new_attempts, error, job_id),
@@ -297,15 +321,21 @@ def _project_one_job(
         return ProjectionResult(job_id=job_id, outcome=outcome, error=str(exc))
 
 
-def run_projection_batch(config: SessionStoreConfig | None = None) -> list[ProjectionResult]:
+def run_projection_batch(
+    config: SessionStoreConfig | None = None,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+) -> list[ProjectionResult]:
     """Run one batch of outbox->session_core projection.
 
-    Reads all current pending/failed project_envelope outbox rows, projects
-    each into session_core.sessions/session_core.turns, and resolves each
-    outbox row to done/failed/dead_letter. Returns the list of per-row
-    results. Never raises on a per-row projection failure — only a
-    connection-level failure (e.g. Postgres unreachable) propagates, since
-    there is nothing meaningful to do per-row in that case.
+    Claims up to batch_size pending/failed project_envelope outbox rows
+    (input.md "2." — previously claimed ALL such rows in one transaction,
+    unbounded; see turn_projector.py pre-change docstring/grep evidence in
+    the job report), projects each into session_core.sessions/
+    session_core.turns, and resolves each outbox row to done/failed/
+    dead_letter. Returns the list of per-row results. Never raises on a
+    per-row projection failure — only a connection-level failure (e.g.
+    Postgres unreachable) propagates, since there is nothing meaningful to
+    do per-row in that case.
 
     This function calls NO external LLM/HTTP service — role mapping
     (map_role) and turn_seq computation are pure, deterministic, in-process
@@ -313,17 +343,19 @@ def run_projection_batch(config: SessionStoreConfig | None = None) -> list[Proje
     """
     cfg = config or SessionStoreConfig.from_env()
     results: list[ProjectionResult] = []
+    locked_by = worker_identity()
 
     with psycopg.connect(cfg.conninfo()) as conn:
         with conn.transaction():
             with conn.cursor() as cur:
-                jobs = _fetch_pending_jobs(cur)
-        # jobs is materialized above; rows were SKIP LOCKED-selected and the
-        # transaction that held that lock has already committed/closed, so
-        # each job is now processed in its own short transaction via
-        # _project_one_job. This intentionally trades the row-lock window
-        # for retry-safety: see "Risks" in the report for the single-worker
-        # assumption this relies on.
+                set_claim_statement_timeout(cur)
+                jobs = _fetch_pending_jobs(cur, batch_size, locked_by)
+        # jobs is materialized above; rows were SKIP LOCKED-selected (LIMIT
+        # batch_size) and the transaction that held that lock has already
+        # committed/closed, so each job is now processed in its own short
+        # transaction via _project_one_job. This intentionally trades the
+        # row-lock window for retry-safety: see "Risks" in the report for
+        # the single-worker assumption this relies on.
         for job_id, source_id, attempts, max_attempts in jobs:
             results.append(_project_one_job(conn, job_id, source_id, attempts, max_attempts))
 

@@ -24,3 +24,9 @@ __pycache__/
 # for the committed template (placeholder values only) and
 # session_store/runtime_env.py for the loader.
 /session.env
+
+# Sandbox ingest outbox (job: session-ingest-hook-sandboxed-001) — the 6
+# hooks' disposable NDJSON sink + byte-offset store. Runtime-only, never a
+# committed artifact. The default sink lives here when
+# CIC_SESSION_INGEST_OUTBOX is unset.
+/hooks/.sandbox-outbox/

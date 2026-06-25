@@ -1,0 +1,76 @@
+{
+  "_README": [
+    "SANDBOX EXAMPLE ONLY — job: session-ingest-hook-sandboxed-001.",
+    "This file demonstrates how the 6 session ingest hooks WOULD be wired,",
+    "but it points every hook at a DISPOSABLE sandbox outbox via",
+    "CIC_SESSION_INGEST_OUTBOX, NOT at production Postgres. It is NOT, and",
+    "must never be copied verbatim into, ~/.claude/settings.json or",
+    "~/.claude-personal/settings*.json. Replace {{REPO_ROOT}} and",
+    "{{SANDBOX_DIR}} before any real use, and read",
+    "output/session-ingest-hook-go-live-checklist.md FIRST — going live is a",
+    "deliberate, human-gated privacy/consent decision (every tool-use logged).",
+    "{{SANDBOX_DIR}} must be a throwaway directory, never a real config dir."
+  ],
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CIC_SESSION_INGEST_OUTBOX={{SANDBOX_DIR}}/outbox.ndjson python3 {{REPO_ROOT}}/hooks/UserPromptSubmit.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CIC_SESSION_INGEST_OUTBOX={{SANDBOX_DIR}}/outbox.ndjson python3 {{REPO_ROOT}}/hooks/PostToolUse.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CIC_SESSION_INGEST_OUTBOX={{SANDBOX_DIR}}/outbox.ndjson python3 {{REPO_ROOT}}/hooks/PostToolUseFailure.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CIC_SESSION_INGEST_OUTBOX={{SANDBOX_DIR}}/outbox.ndjson python3 {{REPO_ROOT}}/hooks/Stop.py"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CIC_SESSION_INGEST_OUTBOX={{SANDBOX_DIR}}/outbox.ndjson python3 {{REPO_ROOT}}/hooks/SessionStart.py"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CIC_SESSION_INGEST_OUTBOX={{SANDBOX_DIR}}/outbox.ndjson python3 {{REPO_ROOT}}/hooks/SessionEnd.py"
+          }
+        ]
+      }
+    ]
+  }
+}

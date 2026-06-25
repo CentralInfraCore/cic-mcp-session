@@ -1,7 +1,9 @@
 """
 Write-path for SessionIngressEnvelope -> session_raw.envelopes.
 
-Job: session-raw-event-store-001
+Job: session-raw-event-store-001. Secret-redaction step added by
+session-data-protection-001 (see insert_envelope() and
+session_store/redaction.py).
 Source of truth for the envelope shape:
   output/session-ingress-envelope.schema.yaml (SessionIngressEnvelope)
 Source of truth for the table DDL:
@@ -27,6 +29,8 @@ from typing import Any, Mapping
 
 import psycopg
 from psycopg import sql
+
+from session_store.redaction import redact_secrets
 
 # ---------------------------------------------------------------------------
 # Required envelope fields (mirrors output/session-ingress-envelope.schema.yaml
@@ -175,11 +179,21 @@ def insert_envelope(
     Raises EnvelopeValidationError before ever opening a DB connection if
     the envelope is malformed or declares canonical=true / interpreted=true
     (see "4. canonical/interpreted elutasítás kezelése").
+
+    session-data-protection-001: `envelope["payload"]` is run through
+    session_store.redaction.redact_secrets() BEFORE it is bound into the
+    INSERT params below -- the PERSISTED row never contains the original
+    secret-shaped substrings, only [REDACTED] in their place. This does
+    NOT mutate the caller's own `envelope` dict (redact_secrets() returns
+    a new structure) and does NOT touch `raw_payload_hash` (see
+    redaction.py module docstring for why that hash intentionally still
+    reflects the pre-redaction producer-side bytes).
     """
     validate_envelope(envelope)
 
     cfg = config or SessionStoreConfig.from_env()
     source = envelope["source"]
+    redacted_payload = redact_secrets(envelope["payload"])
 
     insert_stmt = sql.SQL(
         """
@@ -212,7 +226,7 @@ def insert_envelope(
         "source_collector": source["collector"],
         "occurred_at": envelope["occurred_at"],
         "ingested_at": envelope["ingested_at"],
-        "payload": psycopg.types.json.Json(envelope["payload"]),
+        "payload": psycopg.types.json.Json(redacted_payload),
         "payload_encoding": envelope.get("payload_encoding", "json"),
         "raw_payload_hash": envelope["raw_payload_hash"],
         "trust": envelope["trust"],

@@ -63,6 +63,14 @@ Source of truth for the DB connection config this module reuses (NOT
 hardcoded here):
   session_store/envelope_writer.py:SessionStoreConfig.from_env()
 
+Source of truth for the shared env-file loader this module calls ONCE at
+import time, BEFORE any tool's SessionStoreConfig.from_env() call below
+(job: session-runtime-env-unification-001 — closes the drift where this
+server, session_store/worker_loop.py, and the cic-mcp-gateway session-
+adapter subprocess launch path could each resolve a different DB purely
+from whatever each process's own os.environ happened to contain):
+  session_store/runtime_env.py:load_session_env()
+
 Scope: this module wraps 7 session_api.* functions total as thin MCP tools
 (search_context_hybrid from session-mcp-tools-001, plus the 6 added by
 session-mcp-tools-remaining-001: search_context, search_context_vector,
@@ -86,7 +94,14 @@ import psycopg
 from mcp.server.fastmcp import FastMCP
 
 from session_store.envelope_writer import SessionStoreConfig
+from session_store.runtime_env import load_session_env
 from session_store.vector_search import embed_query, to_pgvector_literal
+
+# Load the shared session.env file (if any) BEFORE any tool below calls
+# SessionStoreConfig.from_env() — see session_store/runtime_env.py module
+# docstring for the resolution order. No-op (and harmless to call again)
+# if no env file is found or one was already loaded by this process.
+load_session_env()
 
 mcp = FastMCP("cic-session")
 

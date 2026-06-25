@@ -18,3 +18,9 @@
 /sqlite_data/*.sqlite
 /sqlite_data/*.sqlite3
 __pycache__/
+
+# Local runtime env file (job: session-runtime-env-unification-001) — real
+# DB credentials live ONLY here, never committed. See session.env.example
+# for the committed template (placeholder values only) and
+# session_store/runtime_env.py for the loader.
+/session.env

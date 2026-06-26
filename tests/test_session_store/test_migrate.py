@@ -45,9 +45,11 @@ from session_store.migrate import (
     discover_migrations,
     run_migrations,
 )
+from session_store.raw_read_audit import log_and_read_raw_envelopes
 
 _ALL_SCHEMAS = (
     "schema_migrations",
+    "session_audit",
     "session_api",
     "session_jobs",
     "session_idx",
@@ -95,7 +97,7 @@ def _drop_all_schemas(pg_config: SessionStoreConfig):
     yield
 
 
-def test_discover_migrations_finds_all_six_in_order():
+def test_discover_migrations_finds_all_in_order():
     migrations = discover_migrations()
     assert [m.version for m in migrations] == [
         "0001",
@@ -104,6 +106,8 @@ def test_discover_migrations_finds_all_six_in_order():
         "0004",
         "0005",
         "0006",
+        "0007",
+        "0008",
     ]
     assert [m.filename for m in migrations] == [
         "0001_postgres_schema.sql",
@@ -112,6 +116,8 @@ def test_discover_migrations_finds_all_six_in_order():
         "0004_vector_search_api.sql",
         "0005_hybrid_search_api.sql",
         "0006_source_refs_api.sql",
+        "0007_raw_retention_purge.sql",
+        "0008_data_protection_raw_reads.sql",
     ]
     # every migration must have a non-empty checksum and non-empty SQL text
     for m in migrations:
@@ -120,14 +126,18 @@ def test_discover_migrations_finds_all_six_in_order():
 
 
 def test_full_apply_on_empty_database(pg_config: SessionStoreConfig):
-    """Claim: a fresh, empty DB gets all 6 migrations applied, in order.
+    """Claim: a fresh, empty DB gets all migrations applied, in order.
 
-    Evidence: schema_migrations.applied has exactly 6 rows after the call,
-    versions 0001..0006, and every schema the 6 SQL files create exists
-    afterward.
+    Evidence: schema_migrations.applied has one row per migration after the
+    call, versions 0001..0008, every schema the SQL files create exists
+    afterward, and BOTH session_audit tables (raw_reads from 0008,
+    raw_purges from 0007) are present -- i.e. the runner-only provisioning
+    path produces the full session_audit layer, not just the base schemas.
     """
     applied = run_migrations(config=pg_config)
-    assert applied == ["0001", "0002", "0003", "0004", "0005", "0006"]
+    assert applied == [
+        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008",
+    ]
 
     with psycopg.connect(pg_config.conninfo()) as conn:
         rows = conn.execute(
@@ -141,7 +151,20 @@ def test_full_apply_on_empty_database(pg_config: SessionStoreConfig):
             ("0004", "0004_vector_search_api.sql"),
             ("0005", "0005_hybrid_search_api.sql"),
             ("0006", "0006_source_refs_api.sql"),
+            ("0007", "0007_raw_retention_purge.sql"),
+            ("0008", "0008_data_protection_raw_reads.sql"),
         ]
+
+        # 0008 wires session_audit.raw_reads into the runner, 0007 brought
+        # session_audit.raw_purges -- the from-zero path must produce BOTH.
+        audit_tables = {
+            r[0]
+            for r in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'session_audit'"
+            ).fetchall()
+        }
+        assert audit_tables == {"raw_reads", "raw_purges"}
 
         # session-postgres-schema.sql created these schemas
         schema_names = {
@@ -189,7 +212,9 @@ def test_second_run_is_idempotent_noop(pg_config: SessionStoreConfig):
     the second call.
     """
     first = run_migrations(config=pg_config)
-    assert first == ["0001", "0002", "0003", "0004", "0005", "0006"]
+    assert first == [
+        "0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008",
+    ]
 
     with psycopg.connect(pg_config.conninfo()) as conn:
         before = conn.execute(
@@ -249,3 +274,36 @@ def test_checksum_mismatch_hard_stops(pg_config: SessionStoreConfig, tmp_path):
             "SELECT checksum FROM schema_migrations.applied WHERE version = '0001'"
         ).fetchone()[0]
     assert checksum_after == original_checksum
+
+
+def test_runner_only_provisioning_makes_raw_read_audit_work(
+    pg_config: SessionStoreConfig,
+):
+    """Regression for session-audit-migration-wiring-001 gap #1: a database
+    provisioned ONLY via run_migrations() (no out-of-band SQL apply) must have
+    a working session_audit.raw_reads -- before 0008, raw_reads lived only in
+    output/, so this path raised `relation "session_audit.raw_reads" does not
+    exist` at session_store/raw_read_audit.py:101.
+
+    Evidence: after run_migrations() on an empty DB, the production call site
+    log_and_read_raw_envelopes() succeeds and writes one audit row (here over
+    zero envelopes -> rows_returned = 0). This exercises the real INSERT, not
+    just table existence -- 'table exists' != 'production call site works'.
+    """
+    run_migrations(config=pg_config)
+
+    result = log_and_read_raw_envelopes(
+        reader="migrate_regression",
+        read_kind="admin_query",
+        config=pg_config,
+    )
+    assert result.rows == []  # empty DB: no envelopes to read
+    assert isinstance(result.read_id, int)
+
+    with psycopg.connect(pg_config.conninfo()) as conn:
+        audit = conn.execute(
+            "SELECT reader, read_kind, rows_returned "
+            "FROM session_audit.raw_reads WHERE read_id = %s",
+            (result.read_id,),
+        ).fetchone()
+    assert audit == ("migrate_regression", "admin_query", 0)

@@ -2,6 +2,7 @@
 /.pip-cache/
 /p_venv/
 /.venv-host/
+/.verify_venv/
 /*/*/*/__pycache__/
 /*/*/__pycache__/
 /*/__pycache__/
